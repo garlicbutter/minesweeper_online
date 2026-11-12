@@ -1,0 +1,10 @@
+{
+  "project_id": "appgprj_6af5df86b4e88191b31a262cf40de5fb",
+  "d1": [
+    {
+      "binding": "DB",
+      "database_name": "minefield",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

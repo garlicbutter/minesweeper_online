@@ -1,0 +1,11 @@
+services:
+  minefield:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - minefield-data:/app/.data
+    restart: unless-stopped
+    init: true
+volumes:
+  minefield-data:
