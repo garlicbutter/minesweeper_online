@@ -9,7 +9,7 @@ let boardCells = [], boardState = [], boardShape = '', progressKey = '', lastExp
 let blastTimer, configuredRoom = null;
 let serverClockOffset = 0, lastPollAt = 0, boardFitFrame = 0;
 const gameNow = () => Date.now() + (room && !room.solo ? serverClockOffset : 0);
-let chordPress = null, chordClick = null;
+let chordPress = null, chordClick = null, boardPressId = null;
 const chordPreviewTiles = new Set();
 let audioRound = null, audioPhase = null, audioCountdown = null;
 try { soloState = JSON.parse(sessionStorage.getItem('minefield-solo')); } catch {}
@@ -67,6 +67,43 @@ function roundSound() {
   }
   audioPhase = room.phase;
 }
+const lcdSegments = { '0': 'abcdef', '1': 'bc', '2': 'abdeg', '3': 'abcdg', '4': 'bcfg', '5': 'acdfg', '6': 'acdefg', '7': 'abc', '8': 'abcdefg', '9': 'abcdfg', '-': 'g' };
+function lcd(id, value) {
+  const display = $(id), text = String(value).padStart(3, '0');
+  if (display.dataset.value === text) return;
+  display.dataset.value = text;
+  if (display.children.length !== text.length) {
+    display.replaceChildren(...Array.from(text, () => {
+      const digit = document.createElement('span'); digit.className = 'lcd-digit';
+      for (const segment of 'abcdefg') {
+        const part = document.createElement('i'); part.dataset.segment = segment; digit.append(part);
+      }
+      return digit;
+    }));
+  }
+  [...display.children].forEach((digit, index) => {
+    for (const segment of digit.children) segment.classList.toggle('lit', (lcdSegments[text[index]] || '').includes(segment.dataset.segment));
+  });
+}
+function updateFaces() {
+  const face = $('reset-face');
+  const winner = room?.players.some(player => player.you && player.winner);
+  face.dataset.mood = room?.phase === 'finished' ? (winner ? 'won' : room.winner === null && !room.solo ? 'normal' : 'lost') : boardPressId !== null || (room?.me.explosion && gameNow() - room.me.explosion.at < 850) ? 'surprised' : 'normal';
+  const label = room?.solo ? 'New game' : room?.phase === 'finished' && room.host ? 'Play again' : room ? 'Leave / Reset' : 'Reset game';
+  face.setAttribute('aria-label', label); face.title = label;
+  const opponent = room?.players.find(player => !player.you);
+  $('opponent-face').dataset.mood = opponent?.winner ? 'won' : opponent?.status === 'lost' ? 'lost' : opponent?.explosion && gameNow() - opponent.explosion.at < 850 ? 'surprised' : 'normal';
+  $('opponent-face').setAttribute('aria-label', opponent?.winner ? 'Opponent won' : opponent?.status === 'lost' ? 'Opponent lost' : 'Opponent playing');
+}
+$('reset-face').onclick = () => {
+  clearChordPreview(); boardPressId = null;
+  if (room?.solo) {
+    sound.stop();
+    soloState = create({ ...room.settings, name: room.me.name, solo: true });
+    localAction('ready');
+  } else if (room?.phase === 'finished' && room.host) $('rematch').click();
+  else $('leave').click();
+};
 function name() {
   const value = $('name').value.trim() || 'Player';
   localStorage.setItem('minefield-name', value);
@@ -169,7 +206,7 @@ $('copy').onclick = async () => {
 };
 $('leave').onclick = () => {
   sound.stop(); audioRound = null; audioPhase = null; audioCountdown = null;
-  clearChordPreview(); chordClick = null;
+  clearChordPreview(); chordClick = null; boardPressId = null;
   const previous = session;
   session = room = soloState = null;
   configuredRoom = null; lastExplosion = ''; clearTimeout(blastTimer);
@@ -203,6 +240,7 @@ function cellAction(index, flag) {
     if (room.me.flags.length !== previousCount) sound.play(room.me.flags.length > previousCount ? 'flag' : 'unflag');
     board(room.cells, room.settings, room.me.flags);
     $('mine-count').textContent = room.settings.mines - room.me.flags.length;
+    lcd('mine-led', room.settings.mines - room.me.flags.length);
   }
   action(flag ? 'flag' : 'reveal', index);
 }
@@ -232,6 +270,7 @@ function refreshChordPreview() {
 $('board').addEventListener('pointerdown', event => {
   if (event.button !== 0 || !event.isPrimary) return;
   chordClick = null;
+  if (room?.phase === 'playing' && gameNow() >= (room.availableAt ?? room.startedAt)) { boardPressId = event.pointerId; updateFaces(); }
   const cell = event.target.closest('[data-i]'), index = Number(cell?.dataset.i);
   if (!cell || room?.phase !== 'playing' || gameNow() < (room.availableAt ?? room.startedAt) || !(room.cells[index] > 0)) return;
   clearChordPreview();
@@ -246,18 +285,20 @@ $('board').addEventListener('pointerdown', event => {
   }
 });
 window.addEventListener('pointerup', event => {
+  if (boardPressId === event.pointerId) { boardPressId = null; updateFaces(); }
   if (chordPress?.pointerId === event.pointerId) clearChordPreview();
 });
 window.addEventListener('pointercancel', event => {
+  boardPressId = null; updateFaces();
   if (chordPress?.pointerId === event.pointerId) clearChordPreview();
   chordClick = null;
 });
 $('board').addEventListener('lostpointercapture', event => {
   if (chordPress?.pointerId === event.pointerId) clearChordPreview();
 });
-window.addEventListener('blur', () => { clearChordPreview(); chordClick = null; });
+window.addEventListener('blur', () => { clearChordPreview(); chordClick = null; boardPressId = null; updateFaces(); });
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { clearChordPreview(); chordClick = null; }
+  if (document.hidden) { clearChordPreview(); chordClick = null; boardPressId = null; updateFaces(); }
 });
 $('board').addEventListener('click', event => {
   const cell = event.target.closest('[data-i]');
@@ -285,6 +326,7 @@ $('board').addEventListener('keydown', event => {
 });
 function board(cells, settings, flags = [], demo = false) {
   const shape = `${settings.width}x${settings.height}`, flagged = new Set(flags);
+  const triggered = new Set(!demo && room?.me.status === 'lost' ? room.me.revealed : []);
   if (boardShape !== shape) {
     boardShape = shape;
     $('board').style.gridTemplateColumns = `repeat(${settings.width}, max-content)`;
@@ -302,11 +344,11 @@ function board(cells, settings, flags = [], demo = false) {
   const blast = new Set(explosion && gameNow() - explosion.at < 1000 ? explosion.cells : []);
   cells.forEach((value, index) => {
     const isFlagged = flagged.has(index), pending = !demo && !room?.startedAt && room?.me.opening === index;
-    const state = `${value}/${isFlagged}/${demo}/${pending}/${blast.has(index) ? explosion.sequence : 0}`;
+    const state = `${value}/${isFlagged}/${demo}/${pending}/${blast.has(index) ? explosion.sequence : 0}/${value === -1 && triggered.has(index)}`;
     if (boardState[index] === state) return;
     boardState[index] = state;
     const cell = boardCells[index];
-    cell.className = 'cell' + (value !== null ? ' open n' + value : '') + (value === -1 ? ' mine' : '') + (isFlagged ? ' flag' : '') + (demo ? ' demo' : '') + (pending ? ' opening-pending' : '') + (blast.has(index) ? ' blast' : '');
+    cell.className = 'cell' + (value !== null ? ' open n' + value : '') + (value === -1 ? ' mine' : '') + (isFlagged ? ' flag' : '') + (demo ? ' demo' : '') + (pending ? ' opening-pending' : '') + (blast.has(index) ? ' blast' : '') + (value === -1 && triggered.has(index) ? ' triggered' : '');
     cell.textContent = isFlagged ? '⚑' : pending ? '◎' : value === -1 ? '✳' : value > 0 ? value : '';
     cell.setAttribute('aria-label', `Row ${Math.floor(index / settings.width) + 1}, column ${index % settings.width + 1}: ${isFlagged ? 'flagged' : pending ? 'chosen opening' : value === null ? 'covered' : value === -1 ? 'mine' : value + ' nearby mines'}`);
   });
@@ -323,19 +365,23 @@ function scheduleBoardFit() {
     const mine = room?.settings || { width, height };
     const opponent = room?.players.find(player => !player.you)?.settings || mine;
     const duel = !!room && !room.solo;
-    const stacked = duel && (innerWidth < 760 || (fields.clientWidth - 16) / (mine.width + opponent.width) < 18);
+    const myWeight = Math.max(mine.width, 10), opponentWeight = Math.max(opponent.width, 10);
+    const paneUnit = (fields.clientWidth - 16) / (myWeight + opponentWeight);
+    const stacked = duel && (innerWidth < 760 || paneUnit < 18 || paneUnit * Math.min(myWeight, opponentWeight) < 220);
     fields.classList.toggle('stacked', stacked);
-    fields.style.gridTemplateColumns = duel && !stacked ? `${mine.width}fr ${opponent.width}fr` : 'minmax(0, 1fr)';
+    fields.style.gridTemplateColumns = duel && !stacked ? `${myWeight}fr ${opponentWeight}fr` : 'minmax(0, 1fr)';
     for (const [id, settings] of [['board', mine], ...(duel ? [['opponent-board', opponent]] : [])]) {
-      const grid = $(id), wrap = grid.parentElement, style = getComputedStyle(wrap);
-      const available = wrap.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      const grid = $(id), wrap = grid.parentElement, frame = wrap.parentElement;
+      const style = getComputedStyle(wrap), chrome = getComputedStyle(frame);
+      const decoration = [style, chrome].reduce((sum, css) => sum + ['paddingLeft','paddingRight','borderLeftWidth','borderRightWidth'].reduce((total, key) => total + parseFloat(css[key]), 0), 0);
+      const available = frame.parentElement.clientWidth - decoration;
       if (available <= 0) continue;
-      const gap = available / settings.width < 18 ? 1 : 3;
-      const size = Math.min(25, (available - gap * (settings.width - 1)) / settings.width);
+      const size = Math.min(24, available / settings.width);
       grid.style.gridTemplateColumns = `repeat(${settings.width}, minmax(0, 1fr))`;
-      grid.style.gap = `${gap}px`;
-      grid.style.width = `${size * settings.width + gap * (settings.width - 1)}px`;
+      grid.style.gap = '0px';
+      grid.style.width = `${size * settings.width}px`;
       grid.style.setProperty('--tile-size', `${size}px`);
+      frame.style.width = `${Math.max(208, size * settings.width + decoration)}px`;
     }
   });
 }
@@ -365,6 +411,8 @@ function progress() {
     $('scoreboard').append(card);
   }
   const opponent = players.find(player => !player.you);
+  lcd('opponent-led', (opponent?.settings || room.settings).mines - (opponent?.flags || 0));
+  $('opponent-count').textContent = 'Mines remaining: ' + ((opponent?.settings || room.settings).mines - (opponent?.flags || 0));
   $('fields').classList.toggle('duel', !room.solo);
   $('opponent-field').hidden = room.solo;
   $('your-field-label').hidden = room.solo;
@@ -415,6 +463,7 @@ function render() {
   $('room-prefix').parentElement.hidden = room.solo || hasAI;
   $('board-label').textContent = 'Round ' + room.round;
   $('mine-count').textContent = room.settings.mines - room.me.flags.length;
+  lcd('mine-led', room.settings.mines - room.me.flags.length);
   $('phase').textContent = room.phase === 'waiting' ? 'Lobby' : room.phase === 'finished' ? 'Round complete' : 'Playing';
   $('game-title').textContent = room.phase === 'finished'
     ? (room.players.some(player => player.you && player.winner) ? 'You win' : !room.solo && room.winner === null ? 'Draw' : room.solo ? 'Mine hit' : room.players.some(player => player.bot) ? 'AI wins' : 'Opponent wins')
@@ -439,7 +488,8 @@ function render() {
   tick();
 }
 function tick() {
-  if (!room) { $('timer').textContent = '00:00'; return; }
+  updateFaces();
+  if (!room) { $('timer').textContent = '00:00'; lcd('timer-led', 0); lcd('opponent-timer-led', 0); return; }
   const remaining = Math.ceil(((room.availableAt ?? room.startedAt) - gameNow()) / 1000);
   if (!room.solo && room.phase === 'playing') {
     if (remaining > 0 && remaining <= 3 && audioCountdown !== remaining) { sound.play('tick'); audioCountdown = remaining; }
@@ -455,6 +505,7 @@ function tick() {
   const end = room.phase === 'finished' ? room.finishedAt || room.startedAt : gameNow();
   const seconds = room.startedAt ? Math.max(0, Math.floor((end - room.startedAt) / 1000)) : 0;
   $('timer').textContent = String(Math.floor(seconds / 60)).padStart(2, '0') + ':' + String(seconds % 60).padStart(2, '0');
+  lcd('timer-led', seconds); lcd('opponent-timer-led', seconds);
 }
 function renderDemo() {
   $('setup').hidden = false;
@@ -467,6 +518,7 @@ function renderDemo() {
   $('board-label').textContent = '';
   const preview = config(), previewSettings = PRESETS[preview.difficulty] || { width: 9, height: 9, mines: 10 };
   $('mine-count').textContent = previewSettings.mines;
+  lcd('mine-led', previewSettings.mines);
   progressKey = '';
   $('fields').classList.remove('duel'); $('opponent-field').hidden = $('your-field-label').hidden = true;
   $('scoreboard').replaceChildren();

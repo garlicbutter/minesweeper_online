@@ -52,6 +52,7 @@ PORT=3001 DATA_DIR=/tmp/minefield-qa ./target/release/minefield
 - Left-click a covered cell to reveal it. Left-click an open number to chord only when adjacent flags equal the clue. Right-click toggles flags; touch users have Flag mode.
 - Pressing a revealed number previews its neighbors until release. Mouse/pen chords attempt on press; suppress the following click so the engine runs once. Preserve touch tap/scroll cancellation and keyboard activation. Clear previews on release, cancellation, lost capture, blur, reset, and round completion, and preserve them across polling redraws.
 - Flood fill must respect flags and board boundaries.
+- Keep the fields in the classic Windows XP Minesweeper style: gray square bevels, pixel-colored clues, red LED counters, and a yellow smiley. Keep accessible counter text and tile labels, adaptive no-scroll fitting, and existing gameplay.
 - Tile text must remain nonselectable when dragged.
 - Preserve keyboard controls, responsive layouts, and readable tile numbers.
 - Fields must expand to their full height and fit the available width without internal scrolling or clipping. Use the full match area, hide setup during play, and stack boards when needed on narrow screens. Do not just hide scrollbars over clipped content.

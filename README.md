@@ -40,6 +40,10 @@ Configuration:
 
 The server binary embeds the HTML/CSS/JS interface. Run it from the checkout, or copy `public/minefield.wasm` alongside it under `public/`.
 
+## Field appearance
+
+Fields use the classic Windows XP Minesweeper appearance: gray beveled tiles, pixel-style colored clues, red seven-segment counters, and a yellow smiley. The mine counter shows remaining unflagged mines; the timer counter shows elapsed seconds. The smiley starts a fresh covered solo board, restarts a finished hosted round, or performs Leave / Reset during multiplayer.
+
 ## Play solo
 
 **Single player** is selected by default. Choose a difficulty and click **Start single player**. Every square stays covered until your actual first click. That click is always safe and starts the timer. All solo moves run locally in Rust WebAssembly without API requests. Reloading resumes the current tab’s saved game.
@@ -132,6 +136,7 @@ PLAYWRIGHT_PATH=/path/to/playwright node tests/chord-preview.cjs
 PLAYWRIGHT_PATH=/path/to/playwright node tests/ai-browser.cjs
 PLAYWRIGHT_PATH=/path/to/playwright node tests/layout-start.cjs
 PLAYWRIGHT_PATH=/path/to/playwright node tests/sound-browser.cjs
+PLAYWRIGHT_PATH=/path/to/playwright node tests/xp-theme.cjs
 ```
 
 It checks browser-local solo play with API access blocked, click latency, persistent DOM tiles, covered starts/replays, two-player play with different difficulties, safe openings, revealed-only opponent tiles and flags, continued play after explosions, nonselectable tile text, reset during a stalled request, and the mobile layout. Set `TEST_URL` to use a different address.
@@ -143,3 +148,5 @@ The AI check covers the compact interface, AI readiness, autonomous moves with b
 The layout/start check verifies full 40 × 30 maps without field scrolling, opponent masking, and synchronized countdowns/timers with client clocks 75 seconds apart. The smoke check identifies mines from private test snapshots: set `TEST_DATA_DIR` to the server’s `DATA_DIR` when using an isolated directory.
 
 The sound check verifies lazy audio startup, reveal/flag/chord/explosion/result cues, saved mute preferences, silent previews and AI moves, countdown deduplication, and graceful fallback when browser audio is unavailable.
+
+The XP theme check verifies beveled tiles, pixel clues, LED counters, smiley states, fresh-board reset, the struck-mine highlight, and mobile fitting.
