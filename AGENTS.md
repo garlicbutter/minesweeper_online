@@ -10,6 +10,7 @@ This file applies to the entire repository. See `README.md` for player-facing se
 - The same engine compiles to WebAssembly for browser-local solo play. Do not duplicate game rules in JavaScript.
 - `src/wasm.rs` implements the JSON/memory bridge. `public/game.js` loads the module and exposes its bindings.
 - `src/server.rs` owns API routes, room synchronization, snapshots, and asset serving. `src/main.rs` owns startup and shutdown.
+- `public/sound.js` owns generated Web Audio effects. Keep one lazily created audio context, a persistent mute toggle, low volume, and bounded voices. No autoplay or audio downloads; unsupported/blocked audio must not affect gameplay. Cue actual move changes, not no-op previews, repeated polls, or opponent/AI moves. Stop scheduled effects on mute, reset, blur, or hidden tabs.
 - `public/app.js` owns browser interaction and incremental rendering. `public/index.html` and `public/style.css` own layout and appearance.
 - Node.js is only needed for the optional Playwright smoke test. There is no Node application server or npm build pipeline.
 
@@ -130,7 +131,7 @@ For interaction changes, run the existing browser check against a running server
 TEST_URL=http://localhost:3001 PLAYWRIGHT_PATH=/path/to/playwright node tests/browser-smoke.cjs
 ```
 
-Omit `PLAYWRIGHT_PATH` if Playwright resolves normally. This check covers local solo play with the API blocked, click latency, persistent tile nodes, first-click safety, independent difficulties, opponent layouts, explosions, nonselectable tiles, instant reset during a stalled request, and mobile layout. For chord-preview changes, also run `tests/chord-preview.cjs` with the same environment; it exercises held highlights and input cancellation. For layout or start-timing changes, also run `tests/layout-start.cjs` (large boards and skewed client clocks). `tests/browser-smoke.cjs` reads private test snapshots to exercise mine hits; set `TEST_DATA_DIR` to the isolated server’s `DATA_DIR` if it differs from `.data`. Never expose a solution endpoint just for tests. For AI changes, also run `tests/ai-browser.cjs` to verify autonomous play, readiness, and rematches. Report any unavailable verification accurately. Stop test servers you started when finished.
+Omit `PLAYWRIGHT_PATH` if Playwright resolves normally. This check covers local solo play with the API blocked, click latency, persistent tile nodes, first-click safety, independent difficulties, opponent layouts, explosions, nonselectable tiles, instant reset during a stalled request, and mobile layout. For chord-preview changes, also run `tests/chord-preview.cjs` with the same environment; it exercises held highlights and input cancellation. For layout or start-timing changes, also run `tests/layout-start.cjs` (large boards and skewed client clocks). `tests/browser-smoke.cjs` reads private test snapshots to exercise mine hits; set `TEST_DATA_DIR` to the isolated server’s `DATA_DIR` if it differs from `.data`. Never expose a solution endpoint just for tests. For audio changes, also run `tests/sound-browser.cjs` to check cue timing and mute persistence. For AI changes, also run `tests/ai-browser.cjs` to verify autonomous play, readiness, and rematches. Report any unavailable verification accurately. Stop test servers you started when finished.
 
 ## Deployment and repository hygiene
 

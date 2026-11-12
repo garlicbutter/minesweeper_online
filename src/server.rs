@@ -246,6 +246,15 @@ pub fn router(state: Arc<AppState>) -> Router {
                 )
             }),
         )
+        .route(
+            "/sound.js",
+            get(|| async {
+                asset(
+                    include_str!("../public/sound.js"),
+                    "text/javascript; charset=utf-8",
+                )
+            }),
+        )
         .route("/minefield.wasm", get(wasm_asset))
         .route("/health", get(|| async { "ok" }))
         .route("/api/rooms", post(create_room))

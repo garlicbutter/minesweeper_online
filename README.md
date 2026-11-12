@@ -51,6 +51,8 @@ The server binary embeds the HTML/CSS/JS interface. Run it from the checkout, or
 
 Left-click to reveal. Right-click to flag. Press and hold a revealed number to highlight its neighbors. With a mouse or pen, matching adjacent flags perform the chord on press; otherwise the board stays unchanged and the highlight clears on release. Touch uses the same preview and chords on a completed tap. Incorrect flags can uncover a mine. Touch users can toggle **Flag mode**. Keyboard: Tab to focus, arrows to move, Enter to reveal/chord, F to flag.
 
+**Sound: on/off** toggles quiet effects for your moves, the multiplayer countdown, explosions, and results. The setting is remembered on this browser. Sound starts only after user interaction; there is no background music or downloaded audio.
+
 **Play again** creates a fresh, fully covered board. **Leave / Reset** clears the board, timer, flag mode, invite URL, and saved session immediately and restores setup, even while a network request is stalled.
 
 ## Challenge a friend
@@ -103,6 +105,7 @@ Official guidance: [Docker on Render](https://render.com/docs/docker), [native r
 - `src/server.rs`: Axum HTTP API, embedded interface assets, room locking, and durable snapshots.
 - `src/main.rs`: Tokio server, background persistence, and graceful shutdown.
 - `public/app.js`: browser input/rendering, incremental tile updates, and immediate reset.
+- `public/sound.js`: quiet Web Audio effects and the persistent sound toggle.
 
 Room operations are serialized in memory. Presence pings do not trigger disk writes. Changed rooms are saved together every 150 ms; a normal shutdown flushes pending changes. `rooms.json` retains the previous Node server’s JSON schema, so existing unexpired snapshots can be loaded. Rooms expire after 24 hours. Solo state stays in browser session storage. This is a casual game without accounts or production rate limiting.
 
@@ -128,6 +131,7 @@ PLAYWRIGHT_PATH=/path/to/playwright node tests/browser-smoke.cjs
 PLAYWRIGHT_PATH=/path/to/playwright node tests/chord-preview.cjs
 PLAYWRIGHT_PATH=/path/to/playwright node tests/ai-browser.cjs
 PLAYWRIGHT_PATH=/path/to/playwright node tests/layout-start.cjs
+PLAYWRIGHT_PATH=/path/to/playwright node tests/sound-browser.cjs
 ```
 
 It checks browser-local solo play with API access blocked, click latency, persistent DOM tiles, covered starts/replays, two-player play with different difficulties, safe openings, revealed-only opponent tiles and flags, continued play after explosions, nonselectable tile text, reset during a stalled request, and the mobile layout. Set `TEST_URL` to use a different address.
@@ -137,3 +141,5 @@ The focused chord check covers held neighbor highlighting, mismatched flags, mat
 The AI check covers the compact interface, AI readiness, autonomous moves with browser polling blocked, normal forfeit/rematch behavior, and desktop/mobile layouts. Rust tests additionally cover solver deductions, move pacing, wins, mine penalties, and AI persistence.
 
 The layout/start check verifies full 40 × 30 maps without field scrolling, opponent masking, and synchronized countdowns/timers with client clocks 75 seconds apart. The smoke check identifies mines from private test snapshots: set `TEST_DATA_DIR` to the server’s `DATA_DIR` when using an isolated directory.
+
+The sound check verifies lazy audio startup, reveal/flag/chord/explosion/result cues, saved mute preferences, silent previews and AI moves, countdown deduplication, and graceful fallback when browser audio is unavailable.

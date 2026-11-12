@@ -1,4 +1,5 @@
 import { create, act, view, PRESETS } from '/game.js';
+import { sound } from '/sound.js';
 const $ = id => document.getElementById(id);
 let level = 'easy', mode = 'solo', session = null, room = null;
 let flagMode = false, busy = false, polling = false, pendingActions = 0, toastTimeout;
@@ -10,6 +11,7 @@ let serverClockOffset = 0, lastPollAt = 0, boardFitFrame = 0;
 const gameNow = () => Date.now() + (room && !room.solo ? serverClockOffset : 0);
 let chordPress = null, chordClick = null;
 const chordPreviewTiles = new Set();
+let audioRound = null, audioPhase = null, audioCountdown = null;
 try { soloState = JSON.parse(sessionStorage.getItem('minefield-solo')); } catch {}
 try { session = JSON.parse(sessionStorage.getItem('minefield-session')); } catch {}
 $('name').value = localStorage.getItem('minefield-name') || '';
@@ -40,12 +42,31 @@ async function request(path, body, credentials = session) {
   } finally { clearTimeout(timeout); requests.delete(controller); }
 }
 function localAction(type, index) {
+  const previous = room;
   act(soloState, soloState.players[0].id, { type, index });
   room = view(soloState, soloState.players[0].id);
+  moveSound(previous, room, type, index);
   sessionStorage.setItem('minefield-solo', JSON.stringify(soloState));
   render();
 }
 
+function moveSound(previous, next, type, index) {
+  if (!previous || !next) return;
+  if (next.me.hits > previous.me.hits || (next.me.status === 'lost' && previous.me.status !== 'lost')) sound.play('explode');
+  else if (type === 'flag' && previous.me.flags.length !== next.me.flags.length) sound.play(next.me.flags.length > previous.me.flags.length ? 'flag' : 'unflag');
+  else if (type === 'reveal' && next.me.revealed.length > previous.me.revealed.length) sound.play(previous.cells[index] > 0 ? 'chord' : 'reveal');
+}
+function roundSound() {
+  const key = `${room.code}/${room.round}`;
+  if (audioRound !== key) {
+    sound.stop(); audioRound = key; audioPhase = room.phase; audioCountdown = null; return;
+  }
+  if (room.phase === 'finished' && audioPhase !== 'finished') {
+    const win = room.players.some(player => player.you && player.winner);
+    sound.play(win ? 'win' : room.winner === null && !room.solo ? 'draw' : 'lose', room.me.status === 'lost' ? .22 : .06);
+  }
+  audioPhase = room.phase;
+}
 function name() {
   const value = $('name').value.trim() || 'Player';
   localStorage.setItem('minefield-name', value);
@@ -93,9 +114,11 @@ function action(type, index, extra = {}) {
   actionQueue = actionQueue.then(async () => {
     if (session !== current) return;
     try {
+      const previous = room;
       const data = await request('/' + current.code + '/action', { ...extra, type, index }, current);
       if (session !== current) return;
       room = data.room;
+      if (type !== 'flag') moveSound(previous, room, type, index);
       render();
     } catch (e) { if (session === current) toast(e.message); }
   }).finally(() => pendingActions--);
@@ -145,6 +168,7 @@ $('copy').onclick = async () => {
   catch { toast('Share this room code: ' + room.code); }
 };
 $('leave').onclick = () => {
+  sound.stop(); audioRound = null; audioPhase = null; audioCountdown = null;
   clearChordPreview(); chordClick = null;
   const previous = session;
   session = room = soloState = null;
@@ -174,7 +198,9 @@ function cellAction(index, flag) {
   // Flags respond immediately while server-checked multiplayer moves are in flight.
   if (!soloState && flag && !room.me.revealed.includes(index) ) {
     const flags = room.me.flags;
+    const previousCount = flags.length;
     room.me.flags = flags.includes(index) ? flags.filter(i => i !== index) : flags.length < room.settings.mines ? [...flags, index] : flags;
+    if (room.me.flags.length !== previousCount) sound.play(room.me.flags.length > previousCount ? 'flag' : 'unflag');
     board(room.cells, room.settings, room.me.flags);
     $('mine-count').textContent = room.settings.mines - room.me.flags.length;
   }
@@ -362,6 +388,7 @@ function progress() {
 }
 function render() {
   if (!room) return;
+  roundSound();
   const inMatch = room.phase !== 'waiting';
   $('setup').hidden = inMatch;
   document.querySelector('.workspace').classList.toggle('in-match', inMatch);
@@ -414,6 +441,10 @@ function render() {
 function tick() {
   if (!room) { $('timer').textContent = '00:00'; return; }
   const remaining = Math.ceil(((room.availableAt ?? room.startedAt) - gameNow()) / 1000);
+  if (!room.solo && room.phase === 'playing') {
+    if (remaining > 0 && remaining <= 3 && audioCountdown !== remaining) { sound.play('tick'); audioCountdown = remaining; }
+    else if (remaining <= 0 && audioCountdown > 0) { sound.play('start'); audioCountdown = 0; }
+  }
   if (room.phase === 'playing' && remaining > 0) {
     $('status').textContent = 'Starting in ' + remaining + '…'; $('phase').textContent = remaining + '…';
   }

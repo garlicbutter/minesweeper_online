@@ -193,6 +193,7 @@ async fn heartbeat_does_not_trigger_persistence_and_routes_serve_expected_types(
         ("/", "text/html"),
         ("/app.js", "text/javascript"),
         ("/game.js", "text/javascript"),
+        ("/sound.js", "text/javascript"),
         ("/style.css", "text/css"),
     ] {
         let res = app
