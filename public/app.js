@@ -6,6 +6,8 @@ let actionQueue = Promise.resolve(), soloState = null;
 const requests = new Set();
 let boardCells = [], boardState = [], boardShape = '', progressKey = '', lastExplosion = '';
 let blastTimer, configuredRoom = null;
+let serverClockOffset = 0, lastPollAt = 0, boardFitFrame = 0;
+const gameNow = () => Date.now() + (room && !room.solo ? serverClockOffset : 0);
 let chordPress = null, chordClick = null;
 const chordPreviewTiles = new Set();
 try { soloState = JSON.parse(sessionStorage.getItem('minefield-solo')); } catch {}
@@ -19,6 +21,7 @@ function toast(message) {
   toastTimeout = setTimeout(() => $('toast').style.display = 'none', 5000);
 }
 async function request(path, body, credentials = session) {
+  const sentAt = performance.now();
   const controller = new AbortController();
   requests.add(controller);
   const timeout = setTimeout(() => controller.abort(), 8000);
@@ -30,6 +33,9 @@ async function request(path, body, credentials = session) {
     });
     const data = await res.json();
     if (!res.ok) throw Error(data.error || 'Request failed');
+    if (Number.isFinite(data.room?.serverNow)) {
+      serverClockOffset = data.room.serverNow + (performance.now() - sentAt) / 2 - Date.now();
+    }
     return data;
   } finally { clearTimeout(timeout); requests.delete(controller); }
 }
@@ -164,7 +170,7 @@ $('leave').onclick = () => {
 };
 function cellAction(index, flag) {
   if (!room) { toast('Choose a difficulty, then click Start single player.'); return; }
-  if (room.phase !== 'playing' || Date.now() < (room.availableAt ?? room.startedAt)) return;
+  if (room.phase !== 'playing' || gameNow() < (room.availableAt ?? room.startedAt)) return;
   // Flags respond immediately while server-checked multiplayer moves are in flight.
   if (!soloState && flag && !room.me.revealed.includes(index) ) {
     const flags = room.me.flags;
@@ -201,7 +207,7 @@ $('board').addEventListener('pointerdown', event => {
   if (event.button !== 0 || !event.isPrimary) return;
   chordClick = null;
   const cell = event.target.closest('[data-i]'), index = Number(cell?.dataset.i);
-  if (!cell || room?.phase !== 'playing' || Date.now() < (room.availableAt ?? room.startedAt) || !(room.cells[index] > 0)) return;
+  if (!cell || room?.phase !== 'playing' || gameNow() < (room.availableAt ?? room.startedAt) || !(room.cells[index] > 0)) return;
   clearChordPreview();
   chordPress = { cell, index, pointerId: event.pointerId };
   cell.setPointerCapture(event.pointerId);
@@ -267,7 +273,7 @@ function board(cells, settings, flags = [], demo = false) {
     $('board').replaceChildren(fragment);
   }
   const explosion = !demo ? room?.me.explosion : null;
-  const blast = new Set(explosion && Date.now() - explosion.at < 1000 ? explosion.cells : []);
+  const blast = new Set(explosion && gameNow() - explosion.at < 1000 ? explosion.cells : []);
   cells.forEach((value, index) => {
     const isFlagged = flagged.has(index), pending = !demo && !room?.startedAt && room?.me.opening === index;
     const state = `${value}/${isFlagged}/${demo}/${pending}/${blast.has(index) ? explosion.sequence : 0}`;
@@ -279,7 +285,37 @@ function board(cells, settings, flags = [], demo = false) {
     cell.setAttribute('aria-label', `Row ${Math.floor(index / settings.width) + 1}, column ${index % settings.width + 1}: ${isFlagged ? 'flagged' : pending ? 'chosen opening' : value === null ? 'covered' : value === -1 ? 'mine' : value + ' nearby mines'}`);
   });
   refreshChordPreview();
+  scheduleBoardFit();
 }
+function scheduleBoardFit() {
+  if (boardFitFrame) return;
+  boardFitFrame = requestAnimationFrame(() => {
+    boardFitFrame = 0;
+    const fields = $('fields');
+    const [width, height] = boardShape.split('x').map(Number);
+    if (!width || !fields.clientWidth) return;
+    const mine = room?.settings || { width, height };
+    const opponent = room?.players.find(player => !player.you)?.settings || mine;
+    const duel = !!room && !room.solo;
+    const stacked = duel && (innerWidth < 760 || (fields.clientWidth - 16) / (mine.width + opponent.width) < 18);
+    fields.classList.toggle('stacked', stacked);
+    fields.style.gridTemplateColumns = duel && !stacked ? `${mine.width}fr ${opponent.width}fr` : 'minmax(0, 1fr)';
+    for (const [id, settings] of [['board', mine], ...(duel ? [['opponent-board', opponent]] : [])]) {
+      const grid = $(id), wrap = grid.parentElement, style = getComputedStyle(wrap);
+      const available = wrap.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      if (available <= 0) continue;
+      const gap = available / settings.width < 18 ? 1 : 3;
+      const size = Math.min(25, (available - gap * (settings.width - 1)) / settings.width);
+      grid.style.gridTemplateColumns = `repeat(${settings.width}, minmax(0, 1fr))`;
+      grid.style.gap = `${gap}px`;
+      grid.style.width = `${size * settings.width + gap * (settings.width - 1)}px`;
+      grid.style.setProperty('--tile-size', `${size}px`);
+    }
+  });
+}
+const boardSizer = new ResizeObserver(scheduleBoardFit);
+boardSizer.observe($('fields'));
+window.addEventListener('resize', scheduleBoardFit);
 function progress() {
   const key = JSON.stringify([room.settings, room.players, room.solo, room.phase]);
   if (key === progressKey) return;
@@ -309,18 +345,16 @@ function progress() {
   if (!room.solo) {
     const settings = opponent?.settings || room.settings;
     $('opponent-field-label').textContent = `${opponent?.name || 'Opponent'} · ${settings.width} × ${settings.height} · ${settings.mines} mines`;
-    $('opponent-board').style.width = 'max-content';
-    $('opponent-board').style.gridTemplateColumns = `repeat(${settings.width}, max-content)`;
-    $('opponent-board').setAttribute('aria-label', `${opponent?.name || 'Opponent'} full board: all numbers and mines`);
-    const cleared = new Set(opponent?.clearedCells || []), fragment = document.createDocumentFragment();
-    const blast = new Set(opponent?.explosion && Date.now() - opponent.explosion.at < 1500 ? opponent.explosion.cells : []);
+    $('opponent-board').setAttribute('aria-label', `${opponent?.name || 'Opponent'} revealed board`);
+    const cleared = new Set(opponent?.clearedCells || []), flags = new Set(opponent?.flaggedCells || []), fragment = document.createDocumentFragment();
+    const blast = new Set(opponent?.explosion && gameNow() - opponent.explosion.at < 1500 ? opponent.explosion.cells : []);
     const cells = opponent?.cells || Array(settings.width * settings.height).fill(null);
     cells.forEach((value, i) => {
       const cell = document.createElement('span');
-      cell.className = 'cell spectator-cell' + (cleared.has(i) ? ' open cleared' : ' covered') + (value === -1 ? ' mine' : value !== null ? ' n' + value : '') + (blast.has(i) ? ' blast' : '');
-      cell.textContent = value === -1 ? '✳' : value > 0 ? value : '';
+      cell.className = 'cell spectator-cell' + (cleared.has(i) ? ' open cleared' : ' covered') + (value === -1 ? ' mine' : value !== null ? ' n' + value : '') + (flags.has(i) ? ' flag' : '') + (blast.has(i) ? ' blast' : '');
+      cell.textContent = flags.has(i) ? '⚑' : value === -1 ? '✳' : value > 0 ? value : '';
       cell.dataset.index = i;
-      cell.setAttribute('aria-label', `Row ${Math.floor(i / settings.width) + 1}, column ${i % settings.width + 1}: ${value === null ? 'not generated yet' : value === -1 ? 'mine' : value + ' nearby mines'}${cleared.has(i) ? ', cleared' : ''}`);
+      cell.setAttribute('aria-label', `Row ${Math.floor(i / settings.width) + 1}, column ${i % settings.width + 1}: ${flags.has(i) ? 'flagged' : value === null ? 'covered' : value === -1 ? 'mine' : value + ' nearby mines'}${cleared.has(i) ? ', cleared' : ''}`);
       fragment.append(cell);
     });
     $('opponent-board').replaceChildren(fragment);
@@ -328,6 +362,9 @@ function progress() {
 }
 function render() {
   if (!room) return;
+  const inMatch = room.phase !== 'waiting';
+  $('setup').hidden = inMatch;
+  document.querySelector('.workspace').classList.toggle('in-match', inMatch);
   if (configuredRoom !== room.code) {
     configuredRoom = room.code;
     tab(room.solo ? 'solo' : room.players.some(player => player.bot) ? 'ai' : room.host ? 'multi' : 'join');
@@ -366,7 +403,7 @@ function render() {
   const explosion = room.me.explosion;
   if (explosion && lastExplosion !== `${room.code}/${room.round}/${explosion.sequence}`) {
     lastExplosion = `${room.code}/${room.round}/${explosion.sequence}`;
-    if (Date.now() - explosion.at < 5000) {
+    if (gameNow() - explosion.at < 5000) {
       toast(`${explosion.width} × ${explosion.height} area reset and reshuffled.`);
       clearTimeout(blastTimer);
       blastTimer = setTimeout(() => { if (room) board(room.cells, room.settings, room.me.flags); }, 1050);
@@ -376,7 +413,7 @@ function render() {
 }
 function tick() {
   if (!room) { $('timer').textContent = '00:00'; return; }
-  const remaining = Math.ceil(((room.availableAt ?? room.startedAt) - Date.now()) / 1000);
+  const remaining = Math.ceil(((room.availableAt ?? room.startedAt) - gameNow()) / 1000);
   if (room.phase === 'playing' && remaining > 0) {
     $('status').textContent = 'Starting in ' + remaining + '…'; $('phase').textContent = remaining + '…';
   }
@@ -384,11 +421,13 @@ function tick() {
     $('phase').textContent = 'Choose your first square';
     $('status').textContent = 'First click is safe.';
   }
-  const end = room.phase === 'finished' ? room.finishedAt || room.startedAt : Date.now();
+  const end = room.phase === 'finished' ? room.finishedAt || room.startedAt : gameNow();
   const seconds = room.startedAt ? Math.max(0, Math.floor((end - room.startedAt) / 1000)) : 0;
   $('timer').textContent = String(Math.floor(seconds / 60)).padStart(2, '0') + ':' + String(seconds % 60).padStart(2, '0');
 }
 function renderDemo() {
+  $('setup').hidden = false;
+  document.querySelector('.workspace').classList.remove('in-match');
   $('setup').querySelectorAll('input,button').forEach(button => button.disabled = false);
   $('room-bar').hidden = $('ready').hidden = $('rematch').hidden = true;
   $('game-title').textContent = 'Single player';
@@ -404,9 +443,12 @@ function renderDemo() {
   tick();
   tab(mode);
 }
-setInterval(tick, 250);
+setInterval(tick, 100);
 setInterval(async () => {
   if (!session || polling || busy || pendingActions) return;
+  const cadence = room?.phase === 'waiting' || (room?.availableAt && gameNow() < room.availableAt) ? 200 : 1000;
+  if (performance.now() - lastPollAt < cadence) return;
+  lastPollAt = performance.now();
   const current = session;
   polling = true;
   try {
@@ -414,7 +456,7 @@ setInterval(async () => {
     if (session === current && !pendingActions) { room = data.room; render(); }
   } catch { if (session === current) $('status').textContent = 'Connection interrupted. Retrying…'; }
   finally { polling = false; }
-}, 1000);
+}, 200);
 const invite = new URL(location.href).searchParams.get('room');
 tab(invite ? 'join' : 'solo');
 if (invite) $('code').value = invite.toUpperCase();

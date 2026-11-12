@@ -169,7 +169,7 @@ fn solo_mine_hit_still_ends_the_game() {
     assert!(r.players[0].explosion.is_none());
 }
 #[test]
-fn public_views_show_opponent_numbers_and_mines_but_hide_own_mines_and_tokens() {
+fn public_views_mirror_only_revealed_opponent_cells_and_placed_flags() {
     let mut r = fixture();
     let id = r.players[0].id.clone();
     let q = Player::new("Friend");
@@ -185,7 +185,9 @@ fn public_views_show_opponent_numbers_and_mines_but_hide_own_mines_and_tokens() 
     assert!(v["cells"][0].is_null());
     assert_eq!(v["players"][1]["clearedCells"], json!([1, 6]));
     assert_eq!(v["players"][1]["flags"], 1);
-    assert_eq!(v["players"][1]["cells"][0], -1);
+    assert!(v["players"][1]["cells"][0].is_null());
+    assert_eq!(v["players"][1]["flaggedCells"], json!([0]));
+    assert!(v["players"][1]["cells"][2].is_null());
     assert_eq!(v["players"][1]["cells"][6], 1);
     assert!(v["players"][0]["cells"].is_null());
     assert!(r.view("unknown").is_err());
@@ -199,7 +201,11 @@ fn rejects_invalid_cells_and_preserves_saved_room_format() {
     let saved = serde_json::to_value(&r).unwrap();
     assert!(saved.get("createdAt").is_some());
     let restored: Room = serde_json::from_value(saved).unwrap();
-    assert_eq!(restored.view(&id).unwrap(), r.view(&id).unwrap());
+    let mut restored_view = restored.view(&id).unwrap();
+    let mut original_view = r.view(&id).unwrap();
+    restored_view.as_object_mut().unwrap().remove("serverNow");
+    original_view.as_object_mut().unwrap().remove("serverNow");
+    assert_eq!(restored_view, original_view);
 }
 
 #[test]
@@ -286,7 +292,15 @@ fn explosion_resets_region_preserves_mines_updates_visible_boundary_clues_and_sp
         assert!(view["cells"][i].is_null());
     }
     assert_eq!(serde_json::to_value(&r.players[1]).unwrap(), other);
-    assert_eq!(r.view(&guest).unwrap()["players"][0]["cells"], json!(b));
+    let expected: Vec<Option<i8>> = b
+        .iter()
+        .enumerate()
+        .map(|(i, &value)| p.revealed.contains(&i).then_some(value))
+        .collect();
+    assert_eq!(
+        r.view(&guest).unwrap()["players"][0]["cells"],
+        json!(expected)
+    );
     let next = blast.cells.iter().copied().find(|&i| b[i] == -1).unwrap();
     r.act(&id, &json!({"type":"reveal","index":next})).unwrap();
     assert_eq!(r.players[0].hits, 2);
@@ -344,4 +358,42 @@ fn blasts_are_full_sized_at_edges_and_clamped_on_small_or_fully_mined_regions() 
             .count(),
         36
     );
+}
+
+#[test]
+fn multiplayer_shares_one_start_deadline_after_both_ready_independent_of_openings() {
+    let mut r = Room::new(&json!({"difficulty":"hard"})).unwrap();
+    let host = r.players[0].id.clone();
+    let guest = r.join("Guest").unwrap();
+    r.act(&host, &json!({"type":"ready"})).unwrap();
+    assert_eq!(r.phase, Phase::Waiting);
+    assert!(r.started_at.is_none());
+    assert!(r.available_at.is_none());
+    r.act(&guest, &json!({"type":"ready"})).unwrap();
+    let deadline = r.started_at.unwrap();
+    assert_eq!(Some(deadline), r.available_at);
+    assert!(deadline > now());
+    assert_eq!(
+        r.view(&host).unwrap()["startedAt"],
+        r.view(&guest).unwrap()["startedAt"]
+    );
+    for id in [&host, &guest] {
+        for kind in ["reveal", "flag"] {
+            assert!(r.act(id, &json!({"type":kind,"index":0})).is_err());
+        }
+    }
+    assert!(
+        r.players
+            .iter()
+            .all(|p| p.board.is_none() && p.revealed.is_empty())
+    );
+    let start = now() - 1000;
+    r.available_at = Some(start);
+    r.started_at = Some(start);
+    r.act(&host, &json!({"type":"reveal","index":0})).unwrap();
+    assert_eq!(r.started_at, Some(start));
+    assert!(r.players[1].board.is_none());
+    r.act(&guest, &json!({"type":"reveal","index":479}))
+        .unwrap();
+    assert_eq!(r.started_at, Some(start));
 }

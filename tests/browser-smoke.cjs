@@ -1,6 +1,8 @@
 // Optional: PLAYWRIGHT_PATH=/path/to/playwright node tests/browser-smoke.cjs
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
+const { readFile } = require('node:fs/promises');
+const path = require('node:path');
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const host = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -78,13 +80,23 @@ const assert = require('node:assert/strict');
     await guest.waitForFunction(() => document.querySelectorAll('#opponent-board .cleared').length > 0);
     assert.equal(await host.locator('#board [data-i="0"].mine').count(), 0);
     assert.equal(await guest.locator('#board [data-i="119"].mine').count(), 0);
-    await host.waitForFunction(() => document.querySelectorAll('#opponent-board .mine').length === 25);
-    await guest.waitForFunction(() => document.querySelectorAll('#opponent-board .mine').length === 10);
+    assert.equal(await host.locator('#opponent-board .mine').count(),0);
+    assert.equal(await guest.locator('#opponent-board .mine').count(),0);
     assert.equal(await guest.locator('#board .cell').count(),120);
     assert.equal(await host.locator('#opponent-board .cell').count(),120);
     assert.equal(await host.locator('#scoreboard progress').nth(0).getAttribute('max'),'71');
     assert.equal(await host.locator('#scoreboard progress').nth(1).getAttribute('max'),'95');
-    const target = Number(await guest.locator('#opponent-board .mine').first().getAttribute('data-index'));
+    // Private test snapshots identify a mine; the public API must never expose it.
+    let stored;
+    for (let attempt=0;attempt<50;attempt++) {
+      try {
+        stored=JSON.parse(await readFile(path.join(process.env.TEST_DATA_DIR || '.data','rooms.json'),'utf8')).find(r=>r.code===code);
+        if (stored?.players[0]?.board) break;
+      } catch {}
+      await host.waitForTimeout(50);
+    }
+    assert(stored?.players[0]?.board, 'Set TEST_DATA_DIR to the test server DATA_DIR');
+    const target=stored.players[0].board.indexOf(-1);
     await host.locator(`#board [data-i="${target}"]`).click();
     await host.waitForFunction(() => document.querySelector('#toast').textContent.includes('area reset and reshuffled'));
     const blast = await host.evaluate(async () => {
@@ -95,7 +107,7 @@ const assert = require('node:assert/strict');
     assert(blast.me.explosion.cells.every(i => blast.cells[i] === null));
     assert.equal(await host.locator('#board .blast').count(),36);
     await guest.waitForFunction(index => !document.querySelector(`#opponent-board [data-index="${index}"]`).classList.contains('mine'),target);
-    assert.equal(await guest.locator('#opponent-board .mine').count(),10);
+    assert.equal(await guest.locator('#opponent-board .mine').count(),0);
     assert(await guest.locator('#opponent-board .n1').count() > 0);
     // Leaving is still immediate; mine hits alone no longer finish the round.
     assert.equal(await host.locator('#scoreboard progress').count(), 2);
@@ -103,7 +115,7 @@ const assert = require('node:assert/strict');
     await host.setViewportSize({ width: 390, height: 844 });
     assert(await host.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     const own = await host.locator('.player-field').boundingBox(), rival = await host.locator('.opponent-field').boundingBox();
-    assert(rival.x > own.x); assert(Math.abs(rival.y - own.y) < 2);
+    assert(rival.y > own.y); assert(Math.abs(rival.x - own.x) < 2);
     await host.screenshot({ path: '/tmp/minefield-mobile.png', fullPage: true });
     // Reset must finish immediately while a multiplayer action is stuck in flight.
     let release;
@@ -124,7 +136,7 @@ const assert = require('node:assert/strict');
     await host.waitForTimeout(1200);
     assert.equal(await host.locator('#room-bar').isVisible(), false);
     assert.deepEqual(errors, []);
-    console.log(`Browser QA passed: solo click ${latency.toFixed(1)} ms without API access, persistent tiles, safe first clicks, covered replay, multiplayer progress, independent preset/custom maps, full opponent clues/mines, 6x6 explosion and continued play, nonselectable tiles, instant reset during a stalled request, and mobile layout.`);
+    console.log(`Browser QA passed: solo click ${latency.toFixed(1)} ms without API access, persistent tiles, safe first clicks, covered replay, multiplayer progress, independent preset/custom maps, revealed-only opponent cells, 6x6 explosion and continued play, nonselectable tiles, instant reset during a stalled request, and mobile layout.`);
   } finally {
     for (const page of [host, guest]) await page.evaluate(() => document.querySelector('#leave')?.click()).catch(() => {});
     await browser.close();

@@ -60,13 +60,15 @@ Left-click to reveal. Right-click to flag. Press and hold a revealed number to h
 3. Your friend opens the same website, selects **Join room** (or opens the invite link), and chooses their own preset or custom difficulty.
 4. Both click **Ready to play**, wait for the three-second countdown, then choose a first square.
 
-Each player has a separate map with their own dimensions and mine count. Difficulty can also be changed in the lobby before clicking Ready. Each map is generated on its player's actual first click, which is safe; you do not wait for the other player's opening. The shared match timer starts on the first opening.
+Each player has a separate map with their own dimensions and mine count. Difficulty can also be changed in the lobby before clicking Ready. Each map is generated on its player's actual first click, which is safe; you do not wait for the other player's opening. When both players are ready, the server sets one shared start time at the end of the countdown. Both timers run from that deadline, even if one player delays their first click. Moves before the deadline are rejected; client countdowns are aligned with the server clock.
 
-Both players’ completion bars show their own map sizes, mine counts, and cleared percentages. The opponent’s board shows **all numbers and mines**, with cleared cells outlined in green. A board remains blank until its player clicks and generates it. Updates arrive every second. Your own hidden cells stay covered, and session tokens stay private.
+Both players’ completion bars show their own map sizes, mine counts, and cleared percentages. The opponent’s board shows **only revealed tiles and placed flags**. Unrevealed cells stay covered, and their hidden values are not sent by the API. Explosion resets become covered again. Updates arrive every second; lobby and countdown updates refresh more frequently. Session tokens stay private.
 
 **Multiplayer mine hits are a setback, not a loss:** a 6 × 6 region around the mine flashes, its revealed cells and flags return to unknown, and its mines reshuffle. The region keeps exactly the same mine count, and mine positions outside it stay fixed. Clues across the whole board are recalculated, so already visible numbers along the boundary can change. The clicked mine becomes safe if the region has any safe squares. At edges the region shifts inward to retain its size; dimensions smaller than six use the available size (e.g. a 5 × 5 board resets entirely). The opponent’s board is unaffected. Repeated hits are allowed and counted.
 
 First to clear every safe cell on their own board wins. Leaving an active match forfeits it. Solo play retains the classic mine-hit loss. The host can start a rematch, keeping both chosen difficulties.
+
+During play, setup is hidden so the boards use the full available space. Fields grow to show every row, fit their width without internal scrollbars, and stack on smaller screens. Leave / Reset restores setup.
 
 To test both players on one computer, use separate browser profiles or an incognito window. For the same Wi-Fi, use the host’s LAN address (e.g. `http://192.168.1.20:3000`) on both devices. Run `hostname -I` to find it. Open that address before copying an invite; localhost links only work on the host computer.
 
@@ -116,7 +118,7 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-Rust tests cover generation invariants, custom input validation, safe first clicks, chording, independent preset/custom maps, full opponent views, 6 × 6 blast geometry, mine-count preservation, clue consistency after reshuffling, edge and small-board explosions, unaffected opponents, room APIs, persistence, expiration, forfeit, and rematches.
+Rust tests cover generation invariants, custom input validation, safe first clicks, chording, independent preset/custom maps, masked opponent views, 6 × 6 blast geometry, mine-count preservation, clue consistency after reshuffling, edge and small-board explosions, unaffected opponents, room APIs, persistence, expiration, forfeit, and rematches.
 
 Optional end-to-end browser check (requires Playwright/Chromium installed separately; Node is used only by this developer test):
 
@@ -125,10 +127,13 @@ Optional end-to-end browser check (requires Playwright/Chromium installed separa
 PLAYWRIGHT_PATH=/path/to/playwright node tests/browser-smoke.cjs
 PLAYWRIGHT_PATH=/path/to/playwright node tests/chord-preview.cjs
 PLAYWRIGHT_PATH=/path/to/playwright node tests/ai-browser.cjs
+PLAYWRIGHT_PATH=/path/to/playwright node tests/layout-start.cjs
 ```
 
-It checks browser-local solo play with API access blocked, click latency, persistent DOM tiles, covered starts/replays, two-player play with different difficulties, safe openings, all opponent numbers/mines, continued play after explosions, nonselectable tile text, reset during a stalled request, and the mobile layout. Set `TEST_URL` to use a different address.
+It checks browser-local solo play with API access blocked, click latency, persistent DOM tiles, covered starts/replays, two-player play with different difficulties, safe openings, revealed-only opponent tiles and flags, continued play after explosions, nonselectable tile text, reset during a stalled request, and the mobile layout. Set `TEST_URL` to use a different address.
 
 The focused chord check covers held neighbor highlighting, mismatched flags, matching chords on press, release without duplicate actions, redraws, edge bounds, keyboard activation, blur/reset cleanup, and touch cancellation/tapping.
 
 The AI check covers the compact interface, AI readiness, autonomous moves with browser polling blocked, normal forfeit/rematch behavior, and desktop/mobile layouts. Rust tests additionally cover solver deductions, move pacing, wins, mine penalties, and AI persistence.
+
+The layout/start check verifies full 40 × 30 maps without field scrolling, opponent masking, and synchronized countdowns/timers with client clocks 75 seconds apart. The smoke check identifies mines from private test snapshots: set `TEST_DATA_DIR` to the server’s `DATA_DIR` when using an isolated directory.

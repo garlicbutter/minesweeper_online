@@ -32,7 +32,11 @@ const assert = require('node:assert/strict');
     await page.locator('#ready').click();
     await page.waitForFunction(() => document.querySelectorAll('#opponent-board .cleared').length > 0);
     assert.equal(await page.locator('#board .open').count(), 0);
-    assert.equal(await page.locator('#opponent-board .mine').count(), 99);
+    assert.equal(await page.locator('#opponent-board .mine').count(), 0);
+    assert(await page.locator('#opponent-board .covered').count() > 0);
+    snapshot = await room();
+    const bot = snapshot.players.find(p => p.bot);
+    assert(bot.cells.every((cell,i) => bot.clearedCells.includes(i) || cell === null));
     await page.locator('#board [data-i="0"]').click();
     await page.waitForFunction(() => document.querySelectorAll('#board .open').length > 0);
     // Block UI polling and prove that the server scheduler still advances the AI.
@@ -69,7 +73,7 @@ const assert = require('node:assert/strict');
     assert.equal(await page.locator('#create').isEnabled(), true);
     assert.equal(await page.evaluate(() => sessionStorage.getItem('minefield-session')), null);
     assert.deepEqual(errors, []);
-    console.log('AI browser QA passed: clean layout, AI readiness, autonomous moves without polling, normal forfeit/rematch, full opponent board, reset, and mobile layout.');
+    console.log('AI browser QA passed: clean layout, AI readiness, autonomous moves without polling, normal forfeit/rematch, revealed-only opponent board, reset, and mobile layout.');
   } finally {
     await page.evaluate(() => document.querySelector('#leave')?.click()).catch(() => {});
     await browser.close();

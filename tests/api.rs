@@ -82,6 +82,12 @@ async fn room_api_independent_difficulties_explosion_forfeit_and_rematch() {
     request(&app, &action, Some(json!({"type":"ready"})), Some(host)).await;
     let (_, ready) = request(&app, &action, Some(json!({"type":"ready"})), Some(guest)).await;
     assert_eq!(ready["room"]["phase"], "playing");
+    assert_eq!(ready["room"]["startedAt"], ready["room"]["availableAt"]);
+    let host_start = request(&app, &base, None, Some(host)).await.1;
+    assert_eq!(host_start["room"]["startedAt"], ready["room"]["startedAt"]);
+    assert!(
+        ready["room"]["startedAt"].as_u64().unwrap() > ready["room"]["serverNow"].as_u64().unwrap()
+    );
     assert!(
         ready["room"]["cells"]
             .as_array()

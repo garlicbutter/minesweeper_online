@@ -460,6 +460,7 @@ impl Room {
                     && self.players.iter().all(|p| p.ready)
                 {
                     self.available_at = Some(now() + if self.solo { 0 } else { 3000 });
+                    self.started_at = if self.solo { None } else { self.available_at };
                     self.phase = Phase::Playing;
                 }
             }
@@ -618,12 +619,13 @@ impl Room {
             let settings = p.settings.unwrap_or(self.settings);
             let board = p.board.as_ref().or(self.board.as_ref());
             let cleared: Vec<_> = p.revealed.iter().copied().filter(|&i| board.is_none_or(|b| b[i] != -1)).collect();
-            // Full opponent layouts are intentionally visible. Your own hidden cells stay masked.
-            let opponent_cells: Option<Vec<Option<i8>>> = if p.id != id { Some((0..settings.len()).map(|i| board.map(|b| b[i])).collect()) } else { None };
-            json!({"name":p.name,"you":p.id==id,"bot":p.bot,"ready":p.ready,"settings":settings,"openingChosen":p.opening.is_some(),"status":p.status,"cleared":cleared.len(),"flags":p.flags.len(),"clearedCells":cleared,"cells":opponent_cells,"hits":p.hits,"explosion":p.explosion,"online":p.bot||now().saturating_sub(p.last_seen)<15000,"winner":self.winner.as_deref()==Some(p.id.as_str())})
+            // Mirror only what the opponent has actually revealed. Never send their hidden layout.
+            let visible: BTreeSet<_> = p.revealed.iter().copied().collect();
+            let opponent_cells: Option<Vec<Option<i8>>> = if p.id != id { Some((0..settings.len()).map(|i| board.and_then(|b| visible.contains(&i).then_some(b[i]))).collect()) } else { None };
+            json!({"name":p.name,"you":p.id==id,"bot":p.bot,"ready":p.ready,"settings":settings,"openingChosen":p.opening.is_some(),"status":p.status,"cleared":cleared.len(),"flags":p.flags.len(),"clearedCells":cleared,"flaggedCells":if p.id != id {Some(&p.flags)} else {None},"cells":opponent_cells,"hits":p.hits,"explosion":p.explosion,"online":p.bot||now().saturating_sub(p.last_seen)<15000,"winner":self.winner.as_deref()==Some(p.id.as_str())})
         }).collect();
         Ok(
-            json!({"code":self.code,"settings":settings,"phase":self.phase,"solo":self.solo,"availableAt":self.available_at,"startedAt":self.started_at,"finishedAt":self.finished_at,"version":self.version,"winner":self.winner.as_ref().map(|winner|if winner==id{"you"}else{"opponent"}),"round":self.round,"host":self.players.first().is_some_and(|p|p.id==id),"me":{"name":me.name,"ready":me.ready,"opening":me.opening,"revealed":me.revealed,"flags":me.flags,"status":me.status,"lastSeen":me.last_seen,"hits":me.hits,"explosion":me.explosion},"players":players,"cells":cells}),
+            json!({"serverNow":now(),"code":self.code,"settings":settings,"phase":self.phase,"solo":self.solo,"availableAt":self.available_at,"startedAt":self.started_at,"finishedAt":self.finished_at,"version":self.version,"winner":self.winner.as_ref().map(|winner|if winner==id{"you"}else{"opponent"}),"round":self.round,"host":self.players.first().is_some_and(|p|p.id==id),"me":{"name":me.name,"ready":me.ready,"opening":me.opening,"revealed":me.revealed,"flags":me.flags,"status":me.status,"lastSeen":me.last_seen,"hits":me.hits,"explosion":me.explosion},"players":players,"cells":cells}),
         )
     }
 }
