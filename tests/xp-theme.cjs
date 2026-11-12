@@ -27,7 +27,7 @@ const assert = require('node:assert/strict');
     const raised=await page.locator('#board .cell').first().evaluate(el=>{
       const s=getComputedStyle(el);return { bg:s.backgroundColor,top:s.borderTopColor,right:s.borderRightColor,radius:s.borderRadius,selection:s.userSelect };
     });
-    assert.deepEqual(raised,{bg:'rgb(192, 192, 192)',top:'rgb(255, 255, 255)',right:'rgb(128, 128, 128)',radius:'0px',selection:'none'});
+    assert.deepEqual(raised,{bg:'rgb(176, 176, 176)',top:'rgb(255, 255, 255)',right:'rgb(128, 128, 128)',radius:'0px',selection:'none'});
     await page.locator('#create').click();
     await page.locator('#board [data-i="0"]').hover();await page.mouse.down();
     assert.equal(await page.locator('#reset-face').getAttribute('data-mood'),'surprised');
