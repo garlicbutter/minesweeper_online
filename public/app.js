@@ -1,7 +1,11 @@
+import { create, act, view, PRESETS } from '/game.js';
 const $ = id => document.getElementById(id);
 let level = 'easy', mode = 'solo', session = null, room = null;
 let flagMode = false, busy = false, polling = false, pendingActions = 0, toastTimeout;
-let actionQueue = Promise.resolve();
+let actionQueue = Promise.resolve(), soloState = null;
+const requests = new Set();
+let boardCells = [], boardState = [], boardShape = '', progressKey = '';
+try { soloState = JSON.parse(sessionStorage.getItem('minefield-solo')); } catch {}
 try { session = JSON.parse(sessionStorage.getItem('minefield-session')); } catch {}
 $('name').value = localStorage.getItem('minefield-name') || '';
 
@@ -12,15 +16,27 @@ function toast(message) {
   toastTimeout = setTimeout(() => $('toast').style.display = 'none', 5000);
 }
 async function request(path, body, credentials = session) {
-  const res = await fetch('/api/rooms' + path, {
-    method: body ? 'POST' : 'GET',
-    headers: { 'Content-Type': 'application/json', ...(credentials ? { Authorization: 'Bearer ' + credentials.token } : {}) },
-    ...(body ? { body: JSON.stringify(body) } : {})
-  });
-  const data = await res.json();
-  if (!res.ok) throw Error(data.error || 'Request failed');
-  return data;
+  const controller = new AbortController();
+  requests.add(controller);
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch('/api/rooms' + path, {
+      method: body ? 'POST' : 'GET', signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', ...(credentials ? { Authorization: 'Bearer ' + credentials.token } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    const data = await res.json();
+    if (!res.ok) throw Error(data.error || 'Request failed');
+    return data;
+  } finally { clearTimeout(timeout); requests.delete(controller); }
 }
+function localAction(type, index) {
+  act(soloState, soloState.players[0].id, { type, index });
+  room = view(soloState, soloState.players[0].id);
+  sessionStorage.setItem('minefield-solo', JSON.stringify(soloState));
+  render();
+}
+
 function name() {
   const value = $('name').value.trim() || 'Player';
   localStorage.setItem('minefield-name', value);
@@ -33,6 +49,13 @@ function config() {
 }
 async function start() {
   if (busy || room) return;
+  if (mode === 'solo') {
+    try {
+      soloState = create({ ...config(), name: name(), solo: true });
+      localAction('ready');
+    } catch (e) { soloState = null; toast(e.message); }
+    return;
+  }
   busy = true;
   $('create').disabled = $('join').disabled = true;
   try {
@@ -51,6 +74,10 @@ async function start() {
   }
 }
 function action(type, index) {
+  if (soloState) {
+    try { localAction(type, index); } catch (e) { toast(e.message); }
+    return Promise.resolve();
+  }
   const current = session;
   if (!current) return Promise.resolve();
   pendingActions++;
@@ -61,7 +88,7 @@ function action(type, index) {
       if (session !== current) return;
       room = data.room;
       render();
-    } catch (e) { toast(e.message); }
+    } catch (e) { if (session === current) toast(e.message); }
   }).finally(() => pendingActions--);
   return actionQueue;
 }
@@ -76,7 +103,7 @@ function tab(nextMode) {
   $('create').textContent = mode === 'solo' ? 'Start single player →' : 'Create challenge ↗';
   $('mode-note').textContent = mode === 'solo'
     ? 'Your pace. Your next best time. A safe opening, ready to play.'
-    : 'Same board. Same opening. Live side-by-side progress.';
+    : 'Same board. Safe first clicks. Live side-by-side progress.';
 }
 $('create').onclick = $('join').onclick = start;
 $('solo-tab').onclick = () => tab('solo');
@@ -105,21 +132,38 @@ $('copy').onclick = async () => {
   try { await navigator.clipboard.writeText(url.href); toast('Invite link copied · Room ' + room.code); }
   catch { toast('Share this room code: ' + room.code); }
 };
-$('leave').onclick = async () => {
-  if (busy) return;
-  busy = true;
-  await action('leave');
-  session = room = null;
+$('leave').onclick = () => {
+  const previous = session;
+  session = room = soloState = null;
+  busy = false;
+  for (const controller of requests) controller.abort();
+  actionQueue = Promise.resolve();
   sessionStorage.removeItem('minefield-session');
+  sessionStorage.removeItem('minefield-solo');
+  flagMode = false;
+  $('flag-mode').setAttribute('aria-pressed', 'false');
+  $('flag-mode').textContent = '⚑ Flag mode: off';
   const url = new URL(location.href);
   url.searchParams.delete('room');
   history.replaceState(null, '', url);
-  busy = false;
   renderDemo();
+  // Leaving the UI never waits for a slow connection or queued moves.
+  if (previous) void fetch('/api/rooms/' + previous.code + '/action', {
+    method: 'POST', keepalive: true, signal: AbortSignal.timeout(8000),
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + previous.token },
+    body: JSON.stringify({ type: 'leave' })
+  }).catch(() => toast('Reset complete. Your friend may need to leave the old room if the server is offline.'));
 };
 function cellAction(index, flag) {
   if (!room) { toast('Choose a difficulty, then click Start single player.'); return; }
-  if (room.phase !== 'playing' || Date.now() < room.startedAt) return;
+  if (room.phase !== 'playing' || Date.now() < (room.availableAt ?? room.startedAt)) return;
+  // Flags respond immediately while server-checked multiplayer moves are in flight.
+  if (!soloState && flag && !room.me.revealed.includes(index) && index !== room.me.opening) {
+    const flags = room.me.flags;
+    room.me.flags = flags.includes(index) ? flags.filter(i => i !== index) : flags.length < room.settings.mines ? [...flags, index] : flags;
+    board(room.cells, room.settings, room.me.flags);
+    $('mine-count').textContent = room.settings.mines - room.me.flags.length;
+  }
   action(flag ? 'flag' : 'reveal', index);
 }
 $('board').addEventListener('click', event => {
@@ -142,21 +186,35 @@ $('board').addEventListener('keydown', event => {
   }
 });
 function board(cells, settings, flags = [], demo = false) {
-  $('board').style.gridTemplateColumns = `repeat(${settings.width}, max-content)`;
-  const focus = document.activeElement?.dataset?.i;
-  const fragment = document.createDocumentFragment();
+  const shape = `${settings.width}x${settings.height}`, flagged = new Set(flags);
+  if (boardShape !== shape) {
+    boardShape = shape;
+    $('board').style.gridTemplateColumns = `repeat(${settings.width}, max-content)`;
+    const fragment = document.createDocumentFragment();
+    boardCells = cells.map((_, index) => {
+      const cell = document.createElement('button');
+      cell.dataset.i = index;
+      fragment.append(cell);
+      return cell;
+    });
+    boardState = [];
+    $('board').replaceChildren(fragment);
+  }
   cells.forEach((value, index) => {
-    const cell = document.createElement('button');
-    cell.dataset.i = index;
-    cell.className = 'cell' + (value !== null ? ' open n' + value : '') + (value === -1 ? ' mine' : '') + (flags.includes(index) ? ' flag' : '') + (demo ? ' demo' : '');
-    cell.textContent = flags.includes(index) ? '⚑' : value === -1 ? '✳' : value > 0 ? value : '';
-    cell.setAttribute('aria-label', `Row ${Math.floor(index / settings.width) + 1}, column ${index % settings.width + 1}: ${flags.includes(index) ? 'flagged' : value === null ? 'covered' : value === -1 ? 'mine' : value + ' nearby mines'}`);
-    fragment.append(cell);
+    const isFlagged = flagged.has(index), pending = !demo && !room?.startedAt && room?.me.opening === index;
+    const state = `${value}/${isFlagged}/${demo}/${pending}`;
+    if (boardState[index] === state) return;
+    boardState[index] = state;
+    const cell = boardCells[index];
+    cell.className = 'cell' + (value !== null ? ' open n' + value : '') + (value === -1 ? ' mine' : '') + (isFlagged ? ' flag' : '') + (demo ? ' demo' : '') + (pending ? ' opening-pending' : '');
+    cell.textContent = isFlagged ? '⚑' : pending ? '◎' : value === -1 ? '✳' : value > 0 ? value : '';
+    cell.setAttribute('aria-label', `Row ${Math.floor(index / settings.width) + 1}, column ${index % settings.width + 1}: ${isFlagged ? 'flagged' : pending ? 'chosen opening' : value === null ? 'covered' : value === -1 ? 'mine' : value + ' nearby mines'}`);
   });
-  $('board').replaceChildren(fragment);
-  if (focus !== undefined) $('board').querySelector(`[data-i="${focus}"]`)?.focus({ preventScroll: true });
 }
 function progress() {
+  const key = JSON.stringify([room.settings, room.players, room.solo, room.phase]);
+  if (key === progressKey) return;
+  progressKey = key;
   const total = room.settings.width * room.settings.height - room.settings.mines;
   $('scoreboard').replaceChildren();
   const players = [...room.players].sort((a, b) => Number(b.you) - Number(a.you));
@@ -216,9 +274,15 @@ function render() {
 }
 function tick() {
   if (!room) { $('timer').textContent = '00:00'; return; }
-  const remaining = Math.ceil((room.startedAt - Date.now()) / 1000);
+  const remaining = Math.ceil(((room.availableAt ?? room.startedAt) - Date.now()) / 1000);
   if (room.phase === 'playing' && remaining > 0) {
     $('status').textContent = 'Starting in ' + remaining + '…'; $('phase').textContent = remaining + '…';
+  }
+  if (room.phase === 'playing' && remaining <= 0 && !room.startedAt) {
+    $('phase').textContent = 'Choose your first square';
+    $('status').textContent = room.me.opening !== null && room.me.opening !== undefined
+      ? 'Opening selected. Waiting for your friend to choose their first square…'
+      : room.solo ? 'Click any square to begin. Your first click is safe.' : 'Choose a square. The board opens once both players have chosen; both first clicks are safe.';
   }
   const end = room.phase === 'finished' ? room.finishedAt || room.startedAt : Date.now();
   const seconds = room.startedAt ? Math.max(0, Math.floor((end - room.startedAt) / 1000)) : 0;
@@ -231,10 +295,12 @@ function renderDemo() {
   $('phase').textContent = 'Ready when you are';
   $('status').textContent = 'Choose a difficulty and start a single-player game.';
   $('board-label').textContent = 'SINGLE PLAYER';
-  $('mine-count').textContent = '10';
+  const preview = config(), previewSettings = PRESETS[preview.difficulty] || { width: 9, height: 9, mines: 10 };
+  $('mine-count').textContent = previewSettings.mines;
+  progressKey = '';
   $('fields').classList.remove('duel'); $('opponent-field').hidden = $('your-field-label').hidden = true;
   $('scoreboard').replaceChildren();
-  board(Array(81).fill(null), { width: 9, height: 9 }, [], true);
+  board(Array(previewSettings.width * previewSettings.height).fill(null), previewSettings, [], true);
   tick();
 }
 setInterval(tick, 250);
@@ -251,7 +317,11 @@ setInterval(async () => {
 const invite = new URL(location.href).searchParams.get('room');
 tab(invite ? 'join' : 'solo');
 if (invite) $('code').value = invite.toUpperCase();
-if (session) {
+if (soloState) {
+  session = null;
+  sessionStorage.removeItem('minefield-session');
+  room = view(soloState, soloState.players[0].id); render();
+} else if (session) {
   try { room = (await request('/' + session.code)).room; render(); }
   catch (e) { session = null; sessionStorage.removeItem('minefield-session'); toast(e.message); renderDemo(); }
 } else renderDemo();

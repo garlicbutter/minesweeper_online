@@ -10,7 +10,7 @@ npm start
 
 Open **http://localhost:3000**. No installation or build step is needed.
 
-**Single player** is selected by default. Choose Easy, Medium, Hard, or Custom, then click **Start single player**. The board starts immediately. **Play again** generates a fresh board after a win or loss. **End game / change mode** lets you change difficulty or switch to multiplayer.
+**Single player** is selected by default. Choose Easy, Medium, Hard, or Custom, then click **Start single player**. The board starts fully covered. Your first click generates the mines around that square and starts the timer; the first click is always safe. **Play again** generates a fresh board after a win or loss. **Leave / Reset** lets you change difficulty or switch to multiplayer.
 
 - Easy: 9 × 9, 10 mines.
 - Medium: 16 × 16, 40 mines.
@@ -25,6 +25,8 @@ Left-click a covered cell to reveal it. Right-click to toggle a flag. Left-click
 2. Share the six-character room code or **Copy invite** link.
 3. Your friend opens the same website, selects **Join room**, and enters the code. Invite links fill this in automatically.
 4. Both click **Ready to play**. A three-second countdown starts the race.
+
+After the countdown, each player chooses their first square. Once both have chosen, the server generates one identical map that protects both first clicks, reveals only each player’s chosen opening, and starts the shared timer. No tiles open automatically before you click.
 
 Your playable board appears beside your opponent’s cleared-cell map. Both completion bars show cleared cells, percentages, and readiness/status. The display updates every second. The opponent’s map shows cleared positions without clue numbers or flag locations. First to clear every safe cell wins; hitting a mine forfeits the round. The host can start a rematch.
 
@@ -66,9 +68,15 @@ Without Docker, `npm start` listens on all interfaces on port 3000. Run `hostnam
 
 Keep the server running. Rooms expire after 24 hours. Leaving during an active multiplayer round forfeits it. This is a casual game without accounts or production rate limiting.
 
+## Responsiveness and reset
+
+Solo uses the shared engine directly in your browser: reveals, flood fills, chording, and flags need no API request. Session state is saved in the current browser tab. Multiplayer moves remain server-checked; flags show immediately. Board buttons are kept in place and only changed cells update, so clicks and keyboard focus are not interrupted by periodic polling. Presence updates do not write snapshots; room saves are batched and flushed on a normal server shutdown.
+
+**Leave / Reset** immediately clears the board, timer, flag mode, invite URL, and stored session and restores the setup controls. It works even if a move is waiting for the server. Multiplayer sends a forfeit in the background; if the server is unreachable, the local reset still succeeds, but your friend may need to leave that room too.
+
 ## Mine generation
 
-The server uses cryptographic randomness, unbiased Fisher–Yates shuffling, and protects the central opening plus its eight neighbors. Multiplayer players get exactly the same map and initial cascade. Standard random maps may require guessing; there is no no-guess guarantee.
+The shared game engine uses cryptographic randomness and unbiased Fisher–Yates shuffling. Mines are placed only after the first click. Solo protects that cell and its eight neighbors. Multiplayer waits for both players to choose an opening, protects both chosen cells, then expands the protected neighborhoods where the configured mine count allows. Both players receive the identical map, with their own chosen opening. Standard random maps may require guessing; there is no no-guess guarantee.
 
 References:
 
@@ -89,6 +97,6 @@ Optional browser QA (with Playwright and its Chromium installed separately, and 
 node tests/browser-smoke.cjs
 ```
 
-Set `PLAYWRIGHT_PATH` if Playwright is installed outside this project. The browser check plays solo and two-player sessions on the local Node server, reads test room state from `.data`, and verifies live maps and a narrow mobile viewport.
+Set `PLAYWRIGHT_PATH` if Playwright is installed outside this project. The browser check verifies solo with API access blocked, measures click latency, checks persistent tile nodes, confirms fully covered starts/replays and safe openings, plays a two-player match, and resets while a request is deliberately stalled. It also checks live maps and a narrow mobile viewport.
 
 The optional `npm run build` creates a Cloudflare Worker bundle using a D1 `DB` binding; this is separate from the supported Node/Docker/Render deployment above. Prior Sites publication was not completed because the environment could not resolve the publishing Git endpoint.
