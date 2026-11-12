@@ -305,6 +305,20 @@ fn explosion_resets_region_preserves_mines_updates_visible_boundary_clues_and_sp
     r.act(&id, &json!({"type":"reveal","index":next})).unwrap();
     assert_eq!(r.players[0].hits, 2);
     assert_eq!(r.phase, Phase::Playing);
+    assert!(r.view(&guest).unwrap()["players"][0]["statistics"].is_null());
+    let expected = minefield::game::board_benchmark(
+        s,
+        r.players[0].board.as_ref().unwrap(),
+        &r.players[0].revealed,
+    );
+    r.act(&guest, &json!({"type":"leave"})).unwrap();
+    let results = r.view(&id).unwrap();
+    let stats = &results["players"][0]["statistics"];
+    assert_eq!(stats["threeBV"], expected.0);
+    assert_eq!(stats["solvedThreeBV"], expected.1);
+    assert_eq!(stats["reshuffled"], true);
+    assert_eq!(stats["clicks"], 2);
+    assert!(results["players"][1]["statistics"]["threeBV"].is_number());
 }
 #[test]
 fn blasts_are_full_sized_at_edges_and_clamped_on_small_or_fully_mined_regions() {
@@ -396,4 +410,99 @@ fn multiplayer_shares_one_start_deadline_after_both_ready_independent_of_opening
     r.act(&guest, &json!({"type":"reveal","index":479}))
         .unwrap();
     assert_eq!(r.started_at, Some(start));
+}
+
+fn benchmark_board(mines: &[usize]) -> (Settings, Vec<i8>) {
+    let settings = Settings {
+        width: 5,
+        height: 5,
+        mines: mines.len(),
+    };
+    let mut board = vec![0; 25];
+    for &i in mines {
+        board[i] = -1;
+    }
+    for i in 0..board.len() {
+        if board[i] != -1 {
+            board[i] = settings
+                .neighbors(i)
+                .iter()
+                .filter(|&&j| board[j] == -1)
+                .count() as i8;
+        }
+    }
+    (settings, board)
+}
+
+#[test]
+fn three_bv_counts_openings_boundaries_and_standalone_numbers() {
+    use minefield::game::board_benchmark;
+    let (s, b) = benchmark_board(&[]);
+    assert_eq!(board_benchmark(s, &b, &[]), (1, 0));
+    assert_eq!(board_benchmark(s, &b, &[12]), (1, 1));
+    let (s, b) = benchmark_board(&[0]);
+    // Revealing an opening's numbered border alone earns no opening credit.
+    assert_eq!(board_benchmark(s, &b, &[6]), (1, 0));
+    assert_eq!(board_benchmark(s, &b, &[6, 24]), (1, 1));
+    let (s, b) = benchmark_board(&[10, 11, 12, 13, 14]);
+    assert_eq!(board_benchmark(s, &b, &[0]), (2, 1));
+    assert_eq!(board_benchmark(s, &b, &[0, 24]), (2, 2));
+    let mines: Vec<_> = (5..25).collect();
+    let (s, b) = benchmark_board(&mines);
+    assert_eq!(board_benchmark(s, &b, &[0, 1, 5]), (5, 2));
+}
+
+#[test]
+fn round_statistics_count_wasted_clicks_and_publish_only_at_finish() {
+    let (mut r, id) = solo();
+    let (s, board) = benchmark_board(&[0]);
+    r.settings = s;
+    r.players[0].settings = Some(s);
+    r.players[0].board = Some(board);
+    r.started_at = Some(now().saturating_sub(1000));
+    assert!(r.view(&id).unwrap()["players"][0]["statistics"].is_null());
+    assert!(r.act(&id, &json!({"type":"reveal","index":25})).is_err());
+    for (action, index) in [("reveal", 6), ("reveal", 6), ("flag", 0), ("reveal", 6)] {
+        r.act(&id, &json!({"type":action,"index":index})).unwrap();
+    }
+    assert_eq!(r.phase, Phase::Finished);
+    let stats = r.view(&id).unwrap()["players"][0]["statistics"].clone();
+    assert_eq!(stats["threeBV"], 1);
+    assert_eq!(stats["solvedThreeBV"], 1);
+    assert_eq!(stats["clicks"], 4);
+    assert_eq!(stats["efficiency"], 25.0);
+    assert_eq!(
+        stats["clickBreakdown"],
+        json!({"reveals":1,"flags":1,"chords":2})
+    );
+    assert!(stats["elapsedMs"].as_u64().unwrap() >= 1000);
+    let copy: Room = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
+    assert_eq!(copy.view(&id).unwrap()["players"][0]["statistics"], stats);
+    r.act(&id, &json!({"type":"rematch"})).unwrap();
+    assert_eq!(r.players[0].clicks.as_ref().unwrap().total(), 0);
+    assert!(r.view(&id).unwrap()["players"][0]["statistics"].is_null());
+}
+
+#[test]
+fn incomplete_and_legacy_round_statistics_are_honest() {
+    let (mut r, id) = solo();
+    let (s, board) = benchmark_board(&[0]);
+    r.settings = s;
+    r.players[0].settings = Some(s);
+    r.players[0].board = Some(board);
+    r.act(&id, &json!({"type":"reveal","index":0})).unwrap();
+    let stats = r.view(&id).unwrap()["players"][0]["statistics"].clone();
+    assert_eq!(stats["threeBV"], 1);
+    assert_eq!(stats["solvedThreeBV"], 0);
+    assert_eq!(stats["clicks"], 1);
+    assert_eq!(stats["efficiency"], 0.0);
+    let mut saved = serde_json::to_value(&r).unwrap();
+    saved["players"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("clicks");
+    let old: Room = serde_json::from_value(saved).unwrap();
+    let stats = old.view(&id).unwrap()["players"][0]["statistics"].clone();
+    assert!(stats["clicks"].is_null());
+    assert!(stats["efficiency"].is_null());
 }

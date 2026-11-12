@@ -408,6 +408,31 @@ function progress() {
     const bar = document.createElement('progress'); bar.max = total; bar.value = player.cleared;
     bar.setAttribute('aria-label', player.name + ' cleared cells');
     card.append(title, detail, bar, state);
+    if (room.phase === 'finished' && player.statistics) {
+      const stats = player.statistics, results = document.createElement('dl');
+      results.className = 'round-statistics'; results.setAttribute('aria-label', player.name + ' round statistics');
+      const values = [
+        ['Time', (stats.elapsedMs / 1000).toFixed(2) + ' s'],
+        ['3BV', stats.threeBV ?? '—'], ['Solved 3BV', stats.solvedThreeBV ?? '—'],
+        ['Clicks', stats.clicks ?? '—'], ['Efficiency', stats.efficiency == null ? '—' : stats.efficiency.toFixed(1) + '%']
+      ];
+      for (const [label, value] of values) {
+        const metric = document.createElement('div'), term = document.createElement('dt'), definition = document.createElement('dd');
+        term.textContent = label; definition.textContent = value; metric.append(term, definition); results.append(metric);
+        if (label === '3BV') metric.title = 'Minimum reveals needed without flags or chords: one per zero opening plus each safe number outside those openings.';
+        if (label === 'Solved 3BV') metric.title = 'Opening and standalone-number units revealed on this layout.';
+        if (label === 'Efficiency') metric.title = 'Solved 3BV ÷ clicks × 100%. Chording can exceed 100%.';
+        if (label === 'Clicks' && stats.clickBreakdown) {
+          const c = stats.clickBreakdown; metric.title = `${c.reveals} reveals · ${c.flags} flag toggles · ${c.chords} chord attempts (includes wasted clicks)`;
+        }
+      }
+      card.append(results);
+      if (stats.reshuffled || stats.clicks == null || stats.threeBV == null) {
+        const note = document.createElement('small');
+        note.textContent = [stats.reshuffled ? '3BV and efficiency use the final reshuffled layout.' : '', stats.clicks == null ? 'Click history unavailable for this saved round.' : '', stats.threeBV == null ? 'Map was not generated.' : ''].filter(Boolean).join(' ');
+        card.append(note);
+      }
+    }
     $('scoreboard').append(card);
   }
   const opponent = players.find(player => !player.you);

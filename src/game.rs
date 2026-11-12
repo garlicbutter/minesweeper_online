@@ -170,6 +170,61 @@ pub struct Explosion {
     pub sequence: u32,
 }
 
+/// Opening components plus safe numbers outside every opening's boundary.
+/// Solved units credit a revealed zero in each opening and revealed standalone numbers.
+pub fn board_benchmark(settings: Settings, board: &[i8], revealed: &[usize]) -> (usize, usize) {
+    let mut seen = vec![false; board.len()];
+    let mut opening_cells = vec![false; board.len()];
+    let mut visible = vec![false; board.len()];
+    for &i in revealed {
+        if i < visible.len() {
+            visible[i] = true;
+        }
+    }
+    let (mut total, mut solved) = (0, 0);
+    for i in 0..board.len() {
+        if board[i] != 0 || seen[i] {
+            continue;
+        }
+        total += 1;
+        let mut completed = false;
+        let mut queue = vec![i];
+        seen[i] = true;
+        while let Some(cell) = queue.pop() {
+            completed |= visible[cell];
+            opening_cells[cell] = true;
+            for neighbor in settings.neighbors(cell) {
+                opening_cells[neighbor] = true;
+                if board[neighbor] == 0 && !seen[neighbor] {
+                    seen[neighbor] = true;
+                    queue.push(neighbor);
+                }
+            }
+        }
+        solved += usize::from(completed);
+    }
+    for i in 0..board.len() {
+        if board[i] > 0 && !opening_cells[i] {
+            total += 1;
+            solved += usize::from(visible[i]);
+        }
+    }
+    (total, solved)
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClickCounts {
+    pub reveals: u64,
+    pub flags: u64,
+    pub chords: u64,
+}
+impl ClickCounts {
+    pub fn total(&self) -> u64 {
+        self.reveals + self.flags + self.chords
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Player {
@@ -186,6 +241,9 @@ pub struct Player {
     pub board: Option<Vec<i8>>,
     #[serde(default)]
     pub hits: u32,
+    /// None for older saved rounds whose click history was not recorded.
+    #[serde(default)]
+    pub clicks: Option<ClickCounts>,
     #[serde(default)]
     pub explosion: Option<Explosion>,
     #[serde(default)]
@@ -211,6 +269,7 @@ impl Player {
             settings: None,
             board: None,
             hits: 0,
+            clicks: Some(ClickCounts::default()),
             explosion: None,
             opening: None,
             revealed: vec![],
@@ -227,6 +286,7 @@ impl Player {
         self.revealed.clear();
         self.flags.clear();
         self.hits = 0;
+        self.clicks = Some(ClickCounts::default());
         self.explosion = None;
         self.status = Status::Playing;
     }
@@ -501,6 +561,19 @@ impl Room {
                     .and_then(|v| usize::try_from(v).ok())
                     .filter(|&i| i < settings.len())
                     .ok_or("Invalid cell.")?;
+                // Count accepted tile activations, including wasted clicks and flag removal.
+                // A chord is one activation, even when it opens several cells.
+                if let Some(clicks) = &mut p.clicks {
+                    if action == "flag" {
+                        clicks.flags += 1;
+                    } else if p.revealed.contains(&index)
+                        && p.board.as_ref().is_some_and(|b| b[index] > 0)
+                    {
+                        clicks.chords += 1;
+                    } else {
+                        clicks.reveals += 1;
+                    }
+                }
                 if action == "flag" {
                     if !p.revealed.contains(&index) {
                         if p.flags.contains(&index) {
@@ -622,7 +695,16 @@ impl Room {
             // Mirror only what the opponent has actually revealed. Never send their hidden layout.
             let visible: BTreeSet<_> = p.revealed.iter().copied().collect();
             let opponent_cells: Option<Vec<Option<i8>>> = if p.id != id { Some((0..settings.len()).map(|i| board.and_then(|b| visible.contains(&i).then_some(b[i]))).collect()) } else { None };
-            json!({"name":p.name,"you":p.id==id,"bot":p.bot,"ready":p.ready,"settings":settings,"openingChosen":p.opening.is_some(),"status":p.status,"cleared":cleared.len(),"flags":p.flags.len(),"clearedCells":cleared,"flaggedCells":if p.id != id {Some(&p.flags)} else {None},"cells":opponent_cells,"hits":p.hits,"explosion":p.explosion,"online":p.bot||now().saturating_sub(p.last_seen)<15000,"winner":self.winner.as_deref()==Some(p.id.as_str())})
+            let statistics = (self.phase == Phase::Finished).then(|| {
+                let benchmark = board.map(|b| board_benchmark(settings, b, &p.revealed));
+                let clicks = p.clicks.as_ref().map(ClickCounts::total);
+                let efficiency = benchmark.zip(clicks).and_then(|((_, solved), clicks)| {
+                    (clicks > 0).then(|| solved as f64 / clicks as f64 * 100.0)
+                });
+                let elapsed_ms = self.started_at.zip(self.finished_at).map(|(start, end)| end.saturating_sub(start)).unwrap_or(0);
+                json!({"threeBV":benchmark.map(|b|b.0),"solvedThreeBV":benchmark.map(|b|b.1),"clicks":clicks,"clickBreakdown":p.clicks,"efficiency":efficiency,"elapsedMs":elapsed_ms,"reshuffled":p.hits>0})
+            });
+            json!({"statistics":statistics,"name":p.name,"you":p.id==id,"bot":p.bot,"ready":p.ready,"settings":settings,"openingChosen":p.opening.is_some(),"status":p.status,"cleared":cleared.len(),"flags":p.flags.len(),"clearedCells":cleared,"flaggedCells":if p.id != id {Some(&p.flags)} else {None},"cells":opponent_cells,"hits":p.hits,"explosion":p.explosion,"online":p.bot||now().saturating_sub(p.last_seen)<15000,"winner":self.winner.as_deref()==Some(p.id.as_str())})
         }).collect();
         Ok(
             json!({"serverNow":now(),"code":self.code,"settings":settings,"phase":self.phase,"solo":self.solo,"availableAt":self.available_at,"startedAt":self.started_at,"finishedAt":self.finished_at,"version":self.version,"winner":self.winner.as_ref().map(|winner|if winner==id{"you"}else{"opponent"}),"round":self.round,"host":self.players.first().is_some_and(|p|p.id==id),"me":{"name":me.name,"ready":me.ready,"opening":me.opening,"revealed":me.revealed,"flags":me.flags,"status":me.status,"lastSeen":me.last_seen,"hits":me.hits,"explosion":me.explosion},"players":players,"cells":cells}),

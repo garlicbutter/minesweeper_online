@@ -44,6 +44,8 @@ The server binary embeds the HTML/CSS/JS interface. Run it from the checkout, or
 
 Fields use the classic Windows XP Minesweeper appearance: gray beveled tiles, pixel-style colored clues, red seven-segment counters, and a yellow smiley. The mine counter shows remaining unflagged mines; the timer counter shows elapsed seconds. The smiley starts a fresh covered solo board, restarts a finished hosted round, or performs Leave / Reset during multiplayer.
 
+Results show time, 3BV, solved 3BV, clicks (reveals, flag toggles, chord attempts), and efficiency = solved 3BV ÷ clicks × 100%. Reshuffled rounds use the final layout.
+
 ## Play solo
 
 **Single player** is selected by default. Choose a difficulty and click **Start single player**. Every square stays covered until your actual first click. That click is always safe and starts the timer. All solo moves run locally in Rust WebAssembly without API requests. Reloading resumes the current tab’s saved game.
