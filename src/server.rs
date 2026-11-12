@@ -1,4 +1,4 @@
-use crate::game::{Room, now};
+use crate::game::{Room, Settings, now};
 use axum::{
     Json, Router,
     body::Body,
@@ -137,7 +137,15 @@ async fn join_room(
     Json(input): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let result = with_room(&state, &code, |r| {
-        let id = r.join(input["name"].as_str().unwrap_or("Player"))?;
+        let settings = if ["difficulty", "width", "height", "mines"]
+            .iter()
+            .any(|key| !input[key].is_null())
+        {
+            Settings::from_input(&input)?
+        } else {
+            r.settings
+        };
+        let id = r.join_with_settings(input["name"].as_str().unwrap_or("Player"), settings)?;
         Ok(json!({ "token": id, "room": r.view(&id)? }))
     })?;
     state.dirty.store(true, Ordering::Release);

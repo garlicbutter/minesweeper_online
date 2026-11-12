@@ -4,7 +4,10 @@ let level = 'easy', mode = 'solo', session = null, room = null;
 let flagMode = false, busy = false, polling = false, pendingActions = 0, toastTimeout;
 let actionQueue = Promise.resolve(), soloState = null;
 const requests = new Set();
-let boardCells = [], boardState = [], boardShape = '', progressKey = '';
+let boardCells = [], boardState = [], boardShape = '', progressKey = '', lastExplosion = '';
+let blastTimer, configuredRoom = null;
+let chordPress = null, chordClick = null;
+const chordPreviewTiles = new Set();
 try { soloState = JSON.parse(sessionStorage.getItem('minefield-solo')); } catch {}
 try { session = JSON.parse(sessionStorage.getItem('minefield-session')); } catch {}
 $('name').value = localStorage.getItem('minefield-name') || '';
@@ -60,7 +63,7 @@ async function start() {
   $('create').disabled = $('join').disabled = true;
   try {
     const data = mode === 'join'
-      ? await request('/' + $('code').value.trim().toUpperCase() + '/join', { name: name() })
+      ? await request('/' + $('code').value.trim().toUpperCase() + '/join', { ...config(), name: name() })
       : await request('', { ...config(), name: name(), solo: mode === 'solo' });
     session = { code: data.room.code, token: data.token };
     sessionStorage.setItem('minefield-session', JSON.stringify(session));
@@ -73,7 +76,7 @@ async function start() {
     if (!room) $('create').disabled = $('join').disabled = false;
   }
 }
-function action(type, index) {
+function action(type, index, extra = {}) {
   if (soloState) {
     try { localAction(type, index); } catch (e) { toast(e.message); }
     return Promise.resolve();
@@ -84,7 +87,7 @@ function action(type, index) {
   actionQueue = actionQueue.then(async () => {
     if (session !== current) return;
     try {
-      const data = await request('/' + current.code + '/action', { type, index }, current);
+      const data = await request('/' + current.code + '/action', { ...extra, type, index }, current);
       if (session !== current) return;
       room = data.room;
       render();
@@ -95,7 +98,8 @@ function action(type, index) {
 function tab(nextMode) {
   mode = nextMode;
   $('join-form').hidden = mode !== 'join';
-  $('create-form').hidden = mode === 'join';
+  $('create-form').hidden = false;
+  $('create').hidden = mode === 'join';
   for (const [id, value] of [['solo-tab', 'solo'], ['create-tab', 'multi'], ['join-tab', 'join']]) {
     $(id).classList.toggle('selected', mode === value);
     $(id).setAttribute('aria-pressed', mode === value);
@@ -103,7 +107,7 @@ function tab(nextMode) {
   $('create').textContent = mode === 'solo' ? 'Start single player →' : 'Create challenge ↗';
   $('mode-note').textContent = mode === 'solo'
     ? 'Your pace. Your next best time. A safe opening, ready to play.'
-    : 'Same board. Safe first clicks. Live side-by-side progress.';
+    : 'Choose your own difficulty. Mine hits reshuffle a 6 × 6 area.';
 }
 $('create').onclick = $('join').onclick = start;
 $('solo-tab').onclick = () => tab('solo');
@@ -116,7 +120,7 @@ for (const button of document.querySelectorAll('[data-level]')) button.onclick =
 };
 $('help').onclick = () => $('instructions').showModal();
 $('close-help').onclick = () => $('instructions').close();
-$('ready').onclick = () => action('ready');
+$('ready').onclick = () => action('ready', undefined, { settings: config() });
 $('rematch').onclick = async () => {
   await action('rematch');
   if (room?.solo && room.phase === 'waiting') await action('ready');
@@ -133,8 +137,10 @@ $('copy').onclick = async () => {
   catch { toast('Share this room code: ' + room.code); }
 };
 $('leave').onclick = () => {
+  clearChordPreview(); chordClick = null;
   const previous = session;
   session = room = soloState = null;
+  configuredRoom = null; lastExplosion = ''; clearTimeout(blastTimer);
   busy = false;
   for (const controller of requests) controller.abort();
   actionQueue = Promise.resolve();
@@ -158,7 +164,7 @@ function cellAction(index, flag) {
   if (!room) { toast('Choose a difficulty, then click Start single player.'); return; }
   if (room.phase !== 'playing' || Date.now() < (room.availableAt ?? room.startedAt)) return;
   // Flags respond immediately while server-checked multiplayer moves are in flight.
-  if (!soloState && flag && !room.me.revealed.includes(index) && index !== room.me.opening) {
+  if (!soloState && flag && !room.me.revealed.includes(index) ) {
     const flags = room.me.flags;
     room.me.flags = flags.includes(index) ? flags.filter(i => i !== index) : flags.length < room.settings.mines ? [...flags, index] : flags;
     board(room.cells, room.settings, room.me.flags);
@@ -166,9 +172,67 @@ function cellAction(index, flag) {
   }
   action(flag ? 'flag' : 'reveal', index);
 }
+function clearChordPreview() {
+  const press = chordPress;
+  chordPress = null;
+  for (const cell of chordPreviewTiles) cell.classList.remove('chord-neighbor', 'chord-source');
+  chordPreviewTiles.clear();
+  if (press?.cell.hasPointerCapture(press.pointerId)) press.cell.releasePointerCapture(press.pointerId);
+}
+function refreshChordPreview() {
+  for (const cell of chordPreviewTiles) cell.classList.remove('chord-neighbor', 'chord-source');
+  chordPreviewTiles.clear();
+  if (!chordPress) return;
+  const { index } = chordPress;
+  if (room?.phase !== 'playing' || !(room.cells[index] > 0)) { clearChordPreview(); return; }
+  const { width, height } = room.settings, x = index % width, y = Math.floor(index / width);
+  // This is only a visual neighborhood; Rust remains responsible for validating the chord.
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const nx = x + dx, ny = y + dy;
+    if (!(dx || dy) || nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+    const cell = boardCells[ny * width + nx];
+    cell.classList.add('chord-neighbor'); chordPreviewTiles.add(cell);
+  }
+  boardCells[index].classList.add('chord-source'); chordPreviewTiles.add(boardCells[index]);
+}
+$('board').addEventListener('pointerdown', event => {
+  if (event.button !== 0 || !event.isPrimary) return;
+  chordClick = null;
+  const cell = event.target.closest('[data-i]'), index = Number(cell?.dataset.i);
+  if (!cell || room?.phase !== 'playing' || Date.now() < (room.availableAt ?? room.startedAt) || !(room.cells[index] > 0)) return;
+  clearChordPreview();
+  chordPress = { cell, index, pointerId: event.pointerId };
+  cell.setPointerCapture(event.pointerId);
+  refreshChordPreview();
+  // Mouse and pen chords happen on press. Touch keeps normal tap/scroll cancellation behavior.
+  if (event.pointerType !== 'touch') {
+    event.preventDefault(); cell.focus({ preventScroll: true });
+    chordClick = { index, pointerId: event.pointerId };
+    cellAction(index, false);
+  }
+});
+window.addEventListener('pointerup', event => {
+  if (chordPress?.pointerId === event.pointerId) clearChordPreview();
+});
+window.addEventListener('pointercancel', event => {
+  if (chordPress?.pointerId === event.pointerId) clearChordPreview();
+  chordClick = null;
+});
+$('board').addEventListener('lostpointercapture', event => {
+  if (chordPress?.pointerId === event.pointerId) clearChordPreview();
+});
+window.addEventListener('blur', () => { clearChordPreview(); chordClick = null; });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { clearChordPreview(); chordClick = null; }
+});
 $('board').addEventListener('click', event => {
   const cell = event.target.closest('[data-i]');
-  if (cell) cellAction(Number(cell.dataset.i), flagMode);
+  if (!cell) return;
+  const index = Number(cell.dataset.i);
+  if (event.detail > 0 && chordClick && (chordClick.pointerId === event.pointerId || chordClick.index === index)) {
+    chordClick = null; return; // Do not chord twice from the pointerdown + click event pair.
+  }
+  cellAction(index, flagMode && !(room?.cells[index] > 0));
 });
 $('board').addEventListener('contextmenu', event => {
   const cell = event.target.closest('[data-i]');
@@ -200,33 +264,37 @@ function board(cells, settings, flags = [], demo = false) {
     boardState = [];
     $('board').replaceChildren(fragment);
   }
+  const explosion = !demo ? room?.me.explosion : null;
+  const blast = new Set(explosion && Date.now() - explosion.at < 1000 ? explosion.cells : []);
   cells.forEach((value, index) => {
     const isFlagged = flagged.has(index), pending = !demo && !room?.startedAt && room?.me.opening === index;
-    const state = `${value}/${isFlagged}/${demo}/${pending}`;
+    const state = `${value}/${isFlagged}/${demo}/${pending}/${blast.has(index) ? explosion.sequence : 0}`;
     if (boardState[index] === state) return;
     boardState[index] = state;
     const cell = boardCells[index];
-    cell.className = 'cell' + (value !== null ? ' open n' + value : '') + (value === -1 ? ' mine' : '') + (isFlagged ? ' flag' : '') + (demo ? ' demo' : '') + (pending ? ' opening-pending' : '');
+    cell.className = 'cell' + (value !== null ? ' open n' + value : '') + (value === -1 ? ' mine' : '') + (isFlagged ? ' flag' : '') + (demo ? ' demo' : '') + (pending ? ' opening-pending' : '') + (blast.has(index) ? ' blast' : '');
     cell.textContent = isFlagged ? '⚑' : pending ? '◎' : value === -1 ? '✳' : value > 0 ? value : '';
     cell.setAttribute('aria-label', `Row ${Math.floor(index / settings.width) + 1}, column ${index % settings.width + 1}: ${isFlagged ? 'flagged' : pending ? 'chosen opening' : value === null ? 'covered' : value === -1 ? 'mine' : value + ' nearby mines'}`);
   });
+  refreshChordPreview();
 }
 function progress() {
   const key = JSON.stringify([room.settings, room.players, room.solo, room.phase]);
   if (key === progressKey) return;
   progressKey = key;
-  const total = room.settings.width * room.settings.height - room.settings.mines;
   $('scoreboard').replaceChildren();
   const players = [...room.players].sort((a, b) => Number(b.you) - Number(a.you));
   if (!room.solo && players.length < 2) players.push({ name: 'Waiting for a friend', cleared: 0, ready: false, online: false });
   for (const player of players) {
     const card = document.createElement('div'); card.className = 'progress-card';
     const title = document.createElement('strong'); title.textContent = player.name + (player.you ? ' (you)' : '');
+    const settings = player.settings || room.settings;
+    const total = settings.width * settings.height - settings.mines;
     const percent = Math.floor(player.cleared / total * 100);
     const detail = document.createElement('small');
-    detail.textContent = `${player.cleared} / ${total} cleared · ${percent}%`;
+    detail.textContent = `${settings.width} × ${settings.height} · ${settings.mines} mines · ${player.cleared} / ${total} cleared (${percent}%)`;
     const state = document.createElement('span'); state.className = 'player-state';
-    state.textContent = room.phase === 'waiting' ? (player.ready ? 'Ready ✓' : 'Not ready') : player.winner ? 'Winner' : player.status === 'lost' ? 'Mine hit' : player.online ? 'Playing' : 'Offline';
+    state.textContent = room.phase === 'waiting' ? (player.ready ? 'Ready ✓' : 'Not ready') : player.winner ? 'Winner' : player.status === 'lost' ? 'Mine hit' : player.online ? `${player.hits || 0} explosions` : 'Offline';
     const bar = document.createElement('progress'); bar.max = total; bar.value = player.cleared;
     bar.setAttribute('aria-label', player.name + ' cleared cells');
     card.append(title, detail, bar, state);
@@ -237,22 +305,39 @@ function progress() {
   $('opponent-field').hidden = room.solo;
   $('your-field-label').hidden = room.solo;
   if (!room.solo) {
-    $('opponent-field-label').textContent = opponent?.name ? opponent.name + ' · progress' : 'Opponent’s progress';
-    $('opponent-board').style.width = `min(100%, ${Math.min(room.settings.width * 28, 240 * room.settings.width / room.settings.height)}px)`;
-    $('opponent-board').style.gridTemplateColumns = `repeat(${room.settings.width}, minmax(0, 1fr))`;
-    $('opponent-board').setAttribute('aria-label', `${opponent?.name || 'Opponent'}: ${opponent?.cleared || 0} of ${total} safe cells cleared`);
+    const settings = opponent?.settings || room.settings;
+    $('opponent-field-label').textContent = `${opponent?.name || 'Opponent'} · ${settings.width} × ${settings.height} · ${settings.mines} mines`;
+    $('opponent-board').style.width = 'max-content';
+    $('opponent-board').style.gridTemplateColumns = `repeat(${settings.width}, max-content)`;
+    $('opponent-board').setAttribute('aria-label', `${opponent?.name || 'Opponent'} full board: all numbers and mines`);
     const cleared = new Set(opponent?.clearedCells || []), fragment = document.createDocumentFragment();
-    for (let i = 0; i < room.cells.length; i++) {
+    const blast = new Set(opponent?.explosion && Date.now() - opponent.explosion.at < 1500 ? opponent.explosion.cells : []);
+    const cells = opponent?.cells || Array(settings.width * settings.height).fill(null);
+    cells.forEach((value, i) => {
       const cell = document.createElement('span');
-      cell.className = 'progress-cell' + (cleared.has(i) ? ' cleared' : '');
+      cell.className = 'cell spectator-cell' + (cleared.has(i) ? ' open cleared' : ' covered') + (value === -1 ? ' mine' : value !== null ? ' n' + value : '') + (blast.has(i) ? ' blast' : '');
+      cell.textContent = value === -1 ? '✳' : value > 0 ? value : '';
+      cell.dataset.index = i;
+      cell.setAttribute('aria-label', `Row ${Math.floor(i / settings.width) + 1}, column ${i % settings.width + 1}: ${value === null ? 'not generated yet' : value === -1 ? 'mine' : value + ' nearby mines'}${cleared.has(i) ? ', cleared' : ''}`);
       fragment.append(cell);
-    }
+    });
     $('opponent-board').replaceChildren(fragment);
   }
 }
 function render() {
   if (!room) return;
+  if (configuredRoom !== room.code) {
+    configuredRoom = room.code;
+    const preset = Object.entries(PRESETS).find(([, s]) => s.width === room.settings.width && s.height === room.settings.height && s.mines === room.settings.mines);
+    level = preset?.[0] || 'custom';
+    for (const button of document.querySelectorAll('[data-level]')) button.classList.toggle('selected', button.dataset.level === level);
+    for (const key of ['width', 'height', 'mines']) $(key).value = room.settings[key];
+    $('custom').hidden = level !== 'custom';
+  }
   $('setup').querySelectorAll('input,button').forEach(button => button.disabled = true);
+  if (room.phase === 'waiting' && !room.me.ready) {
+    for (const button of document.querySelectorAll('[data-level], #custom input')) button.disabled = false;
+  }
   $('room-bar').hidden = false;
   $('room-prefix').textContent = room.solo ? 'SINGLE PLAYER' : 'ROOM';
   $('room-code').textContent = room.solo ? '' : room.code;
@@ -267,9 +352,18 @@ function render() {
   $('ready').textContent = room.me.ready ? 'Cancel ready' : 'Ready to play →';
   $('rematch').hidden = room.phase !== 'finished' || !room.host;
   $('status').textContent = room.phase === 'waiting'
-    ? (room.players.length < 2 && !room.solo ? 'Share your code. Your friend joins here.' : room.me.ready ? 'Waiting for your opponent to get ready…' : 'Both players ready? Let’s begin.')
-    : room.phase === 'finished' ? (room.solo ? 'Play again, or end the game to change difficulty.' : 'A good game deserves a rematch.') : 'Clear every safe square. Watch your flags.';
+    ? (room.players.length < 2 && !room.solo ? 'Share your code. Your friend joins here.' : room.me.ready ? 'Waiting for your opponent to get ready…' : 'Choose your difficulty, then click Ready to play.')
+    : room.phase === 'finished' ? (room.solo ? 'Play again, or end the game to change difficulty.' : 'A good game deserves a rematch.') : room.solo ? 'Clear every safe square. Watch your flags.' : 'Mine hit? A 6 × 6 area resets and reshuffles. Keep clearing.';
   board(room.cells, room.settings, room.me.flags);
+  const explosion = room.me.explosion;
+  if (explosion && lastExplosion !== `${room.code}/${room.round}/${explosion.sequence}`) {
+    lastExplosion = `${room.code}/${room.round}/${explosion.sequence}`;
+    if (Date.now() - explosion.at < 5000) {
+      toast(`Mine hit! ${explosion.width} × ${explosion.height} area reset and reshuffled. Keep playing.`);
+      clearTimeout(blastTimer);
+      blastTimer = setTimeout(() => { if (room) board(room.cells, room.settings, room.me.flags); }, 1050);
+    }
+  }
   tick();
 }
 function tick() {
@@ -278,11 +372,9 @@ function tick() {
   if (room.phase === 'playing' && remaining > 0) {
     $('status').textContent = 'Starting in ' + remaining + '…'; $('phase').textContent = remaining + '…';
   }
-  if (room.phase === 'playing' && remaining <= 0 && !room.startedAt) {
+  if (room.phase === 'playing' && remaining <= 0 && room.me.opening === null) {
     $('phase').textContent = 'Choose your first square';
-    $('status').textContent = room.me.opening !== null && room.me.opening !== undefined
-      ? 'Opening selected. Waiting for your friend to choose their first square…'
-      : room.solo ? 'Click any square to begin. Your first click is safe.' : 'Choose a square. The board opens once both players have chosen; both first clicks are safe.';
+    $('status').textContent = 'Click any square to begin. Your first click is safe.';
   }
   const end = room.phase === 'finished' ? room.finishedAt || room.startedAt : Date.now();
   const seconds = room.startedAt ? Math.max(0, Math.floor((end - room.startedAt) / 1000)) : 0;

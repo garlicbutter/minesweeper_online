@@ -44,7 +44,7 @@ fn dir() -> std::path::PathBuf {
     ))
 }
 #[tokio::test]
-async fn room_api_sessions_safe_openings_loss_and_rematch() {
+async fn room_api_independent_difficulties_explosion_forfeit_and_rematch() {
     let path = dir();
     let state = AppState::load(path.clone()).await.unwrap();
     let app = router(state.clone());
@@ -62,7 +62,7 @@ async fn room_api_sessions_safe_openings_loss_and_rematch() {
     let (_, b) = request(
         &app,
         &format!("{base}/join"),
-        Some(json!({"name":"Friend"})),
+        Some(json!({"name":"Friend","difficulty":"hard"})),
         None,
     )
     .await;
@@ -107,7 +107,7 @@ async fn room_api_sessions_safe_openings_loss_and_rematch() {
     state.flush().await.unwrap();
     let saved: Vec<Room> =
         serde_json::from_slice(&tokio::fs::read(path.join("rooms.json")).await.unwrap()).unwrap();
-    let mine = saved[0]
+    let mine = saved[0].players[0]
         .board
         .as_ref()
         .unwrap()
@@ -121,8 +121,26 @@ async fn room_api_sessions_safe_openings_loss_and_rematch() {
         Some(host),
     )
     .await;
-    assert_eq!(lost["room"]["phase"], "finished");
-    assert_eq!(lost["room"]["winner"], "opponent");
+    assert_eq!(lost["room"]["phase"], "playing");
+    assert!(lost["room"]["winner"].is_null());
+    assert_eq!(lost["room"]["me"]["hits"], 1);
+    assert_eq!(
+        lost["room"]["me"]["explosion"]["cells"]
+            .as_array()
+            .unwrap()
+            .len(),
+        36
+    );
+    let guest_view = request(&app, &base, None, Some(guest)).await.1;
+    assert_eq!(guest_view["room"]["settings"]["width"], 30);
+    assert_eq!(
+        guest_view["room"]["players"][0]["cells"]
+            .as_array()
+            .unwrap()
+            .len(),
+        81
+    );
+    request(&app, &action, Some(json!({"type":"leave"})), Some(host)).await;
     assert_eq!(
         request(&app, &action, Some(json!({"type":"rematch"})), Some(guest))
             .await

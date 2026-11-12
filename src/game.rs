@@ -160,10 +160,30 @@ pub enum Phase {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Explosion {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub cells: Vec<usize>,
+    pub at: u64,
+    pub sequence: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Player {
     pub id: String,
     pub name: String,
     pub ready: bool,
+    #[serde(default)]
+    pub settings: Option<Settings>,
+    #[serde(default)]
+    pub board: Option<Vec<i8>>,
+    #[serde(default)]
+    pub hits: u32,
+    #[serde(default)]
+    pub explosion: Option<Explosion>,
     #[serde(default)]
     pub opening: Option<usize>,
     pub revealed: Vec<usize>,
@@ -182,12 +202,76 @@ impl Player {
                 name
             },
             ready: false,
+            settings: None,
+            board: None,
+            hits: 0,
+            explosion: None,
             opening: None,
             revealed: vec![],
             flags: vec![],
             status: Status::Playing,
             last_seen: now(),
         }
+    }
+    fn reset(&mut self) {
+        self.ready = false;
+        self.opening = None;
+        self.board = None;
+        self.revealed.clear();
+        self.flags.clear();
+        self.hits = 0;
+        self.explosion = None;
+        self.status = Status::Playing;
+    }
+    fn explode(&mut self, s: Settings, index: usize) {
+        let width = s.width.min(6);
+        let height = s.height.min(6);
+        let x = (index % s.width).saturating_sub(2).min(s.width - width);
+        let y = (index / s.width).saturating_sub(2).min(s.height - height);
+        let cells: Vec<_> = (y..y + height)
+            .flat_map(|row| (x..x + width).map(move |col| row * s.width + col))
+            .collect();
+        let area: BTreeSet<_> = cells.iter().copied().collect();
+        let board = self
+            .board
+            .as_mut()
+            .expect("explosion requires a generated board");
+        let mines = cells.iter().filter(|&&i| board[i] == -1).count();
+        // If there is space, make the clicked square safe so the shuffle necessarily changes.
+        let mut candidates: Vec<_> = cells
+            .iter()
+            .copied()
+            .filter(|&i| i != index || mines == cells.len())
+            .collect();
+        for i in (1..candidates.len()).rev() {
+            let j = random_int(i + 1);
+            candidates.swap(i, j);
+        }
+        for &i in &cells {
+            board[i] = 0;
+        }
+        for &i in candidates.iter().take(mines) {
+            board[i] = -1;
+        }
+        // Recompute globally: visible clues immediately outside the blast can also change.
+        for i in 0..board.len() {
+            if board[i] != -1 {
+                board[i] = s.neighbors(i).iter().filter(|&&j| board[j] == -1).count() as i8;
+            }
+        }
+        self.revealed.retain(|i| !area.contains(i));
+        self.flags.retain(|i| !area.contains(i));
+        self.status = Status::Playing;
+        self.hits = self.hits.saturating_add(1);
+        self.explosion = Some(Explosion {
+            x,
+            y,
+            width,
+            height,
+            cells,
+            at: now(),
+            sequence: self.hits,
+        });
     }
     fn reveal(&mut self, settings: Settings, board: &[i8], indices: &[usize]) {
         let mut seen = vec![false; board.len()];
@@ -241,12 +325,15 @@ pub struct Room {
 impl Room {
     pub fn new(input: &Value) -> Result<Self, String> {
         let alphabet = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        let settings = Settings::from_input(input)?;
+        let mut player = Player::new(input["name"].as_str().unwrap_or("Player"));
+        player.settings = Some(settings);
         Ok(Self {
             code: (0..6)
                 .map(|_| alphabet[random_int(alphabet.len())] as char)
                 .collect(),
-            settings: Settings::from_input(input)?,
-            players: vec![Player::new(input["name"].as_str().unwrap_or("Player"))],
+            settings,
+            players: vec![player],
             phase: Phase::Waiting,
             solo: input["solo"].as_bool().unwrap_or(false),
             board: None,
@@ -260,10 +347,14 @@ impl Room {
         })
     }
     pub fn join(&mut self, name: &str) -> Result<String, String> {
+        self.join_with_settings(name, self.settings)
+    }
+    pub fn join_with_settings(&mut self, name: &str, settings: Settings) -> Result<String, String> {
         if self.solo || self.phase != Phase::Waiting || self.players.len() >= 2 {
             return Err("This room is full or the match has started.".into());
         }
-        let p = Player::new(name);
+        let mut p = Player::new(name);
+        p.settings = Some(settings);
         let id = p.id.clone();
         self.players.push(p);
         self.version += 1;
@@ -298,15 +389,43 @@ impl Room {
             .iter()
             .position(|p| p.id == id)
             .ok_or("This player is not in the room.")?;
+        // Upgrade previous shared-board snapshots without discarding either player's progress.
+        for p in &mut self.players {
+            if p.settings.is_none() {
+                p.settings = Some(self.settings);
+            }
+            if p.board.is_none() {
+                p.board = self.board.clone();
+            }
+        }
+        self.board = None;
         self.players[pi].last_seen = now();
         let action = input["type"].as_str().unwrap_or("");
         if action == "ping" {
             return Ok(());
         }
         match action {
+            "settings" => {
+                if self.phase != Phase::Waiting {
+                    return Err("Choose your difficulty before the round starts.".into());
+                }
+                let settings = Settings::from_input(input)?;
+                self.players[pi].reset();
+                self.players[pi].settings = Some(settings);
+                if pi == 0 {
+                    self.settings = settings;
+                }
+            }
             "ready" => {
                 if self.phase != Phase::Waiting {
                     return Err("The round has already started.".into());
+                }
+                if !self.players[pi].ready && !input["settings"].is_null() {
+                    let settings = Settings::from_input(&input["settings"])?;
+                    self.players[pi].settings = Some(settings);
+                    if pi == 0 {
+                        self.settings = settings;
+                    }
                 }
                 self.players[pi].ready = !self.players[pi].ready;
                 if self.players.len() == if self.solo { 1 } else { 2 }
@@ -328,11 +447,7 @@ impl Room {
                 self.winner = None;
                 self.round += 1;
                 for p in &mut self.players {
-                    p.ready = false;
-                    p.opening = None;
-                    p.revealed.clear();
-                    p.flags.clear();
-                    p.status = Status::Playing;
+                    p.reset();
                 }
             }
             "leave" => {
@@ -350,24 +465,34 @@ impl Room {
                 {
                     return Err("The board is not active.".into());
                 }
+                let p = &mut self.players[pi];
+                let settings = p.settings.unwrap_or(self.settings);
                 let index = input["index"]
                     .as_u64()
                     .and_then(|v| usize::try_from(v).ok())
-                    .filter(|&i| i < self.settings.len())
+                    .filter(|&i| i < settings.len())
                     .ok_or("Invalid cell.")?;
-                let p = &mut self.players[pi];
                 if action == "flag" {
-                    if !p.revealed.contains(&index) && p.opening != Some(index) {
+                    if !p.revealed.contains(&index) {
                         if p.flags.contains(&index) {
                             p.flags.retain(|&i| i != index);
-                        } else if p.flags.len() < self.settings.mines {
+                        } else if p.flags.len() < settings.mines {
                             p.flags.push(index);
                         }
                     }
                 } else if !p.flags.contains(&index) {
-                    if let Some(board) = self.board.as_ref() {
+                    if p.board.is_none() {
+                        p.opening = Some(index);
+                        let board = generate(settings, &[index]);
+                        p.reveal(settings, &board, &[index]);
+                        p.board = Some(board);
+                        if self.started_at.is_none() {
+                            self.started_at = Some(now());
+                        }
+                    } else {
+                        let board = p.board.as_ref().unwrap();
                         let indices = if p.revealed.contains(&index) {
-                            let ns = self.settings.neighbors(index);
+                            let ns = settings.neighbors(index);
                             if board[index] > 0
                                 && ns.iter().filter(|i| p.flags.contains(i)).count()
                                     == board[index] as usize
@@ -379,21 +504,12 @@ impl Room {
                         } else {
                             vec![index]
                         };
-                        p.reveal(self.settings, board, &indices);
-                    } else {
-                        if p.opening.is_some() {
-                            return Ok(());
-                        }
-                        p.opening = Some(index);
-                        if self.players.iter().all(|p| p.opening.is_some()) {
-                            let openings: Vec<_> =
-                                self.players.iter().filter_map(|p| p.opening).collect();
-                            let board = generate(self.settings, &openings);
-                            self.started_at = Some(now());
-                            for p in &mut self.players {
-                                p.reveal(self.settings, &board, &[p.opening.unwrap()]);
-                            }
-                            self.board = Some(board);
+                        // Temporarily take the board so mutable player state and immutable clues are separate.
+                        let board = p.board.take().unwrap();
+                        p.reveal(settings, &board, &indices);
+                        p.board = Some(board);
+                        if !self.solo && p.status == Status::Lost {
+                            p.explode(settings, *p.revealed.last().unwrap());
                         }
                     }
                     self.finish();
@@ -410,14 +526,13 @@ impl Room {
             .iter()
             .find(|p| p.id == id)
             .ok_or("Room session expired. Rejoin with the room code.")?;
-        let mut revealed = vec![false; self.settings.len()];
-        for &i in &me.revealed {
-            revealed[i] = true;
-        }
-        let cells: Vec<Option<i8>> = (0..self.settings.len())
+        let settings = me.settings.unwrap_or(self.settings);
+        let board = me.board.as_ref().or(self.board.as_ref());
+        let revealed: BTreeSet<_> = me.revealed.iter().copied().collect();
+        let cells: Vec<Option<i8>> = (0..settings.len())
             .map(|i| {
-                self.board.as_ref().and_then(|b| {
-                    if revealed[i] || (self.phase == Phase::Finished && b[i] == -1) {
+                board.and_then(|b| {
+                    if revealed.contains(&i) || (self.phase == Phase::Finished && b[i] == -1) {
                         Some(b[i])
                     } else {
                         None
@@ -426,11 +541,15 @@ impl Room {
             })
             .collect();
         let players: Vec<_> = self.players.iter().map(|p| {
-            let cleared: Vec<_> = p.revealed.iter().copied().filter(|&i| self.board.as_ref().is_none_or(|b| b[i] != -1)).collect();
-            json!({ "name": p.name, "you": p.id == id, "ready": p.ready, "openingChosen": p.opening.is_some(), "status": p.status, "cleared": cleared.len(), "flags": p.flags.len(), "clearedCells": cleared, "online": now().saturating_sub(p.last_seen) < 15000, "winner": self.winner.as_deref() == Some(p.id.as_str()) })
+            let settings = p.settings.unwrap_or(self.settings);
+            let board = p.board.as_ref().or(self.board.as_ref());
+            let cleared: Vec<_> = p.revealed.iter().copied().filter(|&i| board.is_none_or(|b| b[i] != -1)).collect();
+            // Full opponent layouts are intentionally visible. Your own hidden cells stay masked.
+            let opponent_cells: Option<Vec<Option<i8>>> = if p.id != id { Some((0..settings.len()).map(|i| board.map(|b| b[i])).collect()) } else { None };
+            json!({"name":p.name,"you":p.id==id,"ready":p.ready,"settings":settings,"openingChosen":p.opening.is_some(),"status":p.status,"cleared":cleared.len(),"flags":p.flags.len(),"clearedCells":cleared,"cells":opponent_cells,"hits":p.hits,"explosion":p.explosion,"online":now().saturating_sub(p.last_seen)<15000,"winner":self.winner.as_deref()==Some(p.id.as_str())})
         }).collect();
         Ok(
-            json!({ "code": self.code, "settings": self.settings, "phase": self.phase, "solo": self.solo, "availableAt": self.available_at, "startedAt": self.started_at, "finishedAt": self.finished_at, "version": self.version, "winner": self.winner.as_ref().map(|winner| if winner == id { "you" } else { "opponent" }), "round": self.round, "host": self.players.first().is_some_and(|p| p.id == id), "me": { "name": me.name, "ready": me.ready, "opening": me.opening, "revealed": me.revealed, "flags": me.flags, "status": me.status, "lastSeen": me.last_seen }, "players": players, "cells": cells }),
+            json!({"code":self.code,"settings":settings,"phase":self.phase,"solo":self.solo,"availableAt":self.available_at,"startedAt":self.started_at,"finishedAt":self.finished_at,"version":self.version,"winner":self.winner.as_ref().map(|winner|if winner==id{"you"}else{"opponent"}),"round":self.round,"host":self.players.first().is_some_and(|p|p.id==id),"me":{"name":me.name,"ready":me.ready,"opening":me.opening,"revealed":me.revealed,"flags":me.flags,"status":me.status,"lastSeen":me.last_seen,"hits":me.hits,"explosion":me.explosion},"players":players,"cells":cells}),
         )
     }
 }

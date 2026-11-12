@@ -71,36 +71,44 @@ fn solo_is_fully_covered_and_clock_waits_for_first_unflagged_click() {
         assert!(r.board.is_none());
         r.act(&id, &json!({"type":"flag","index":first})).unwrap();
         r.act(&id, &json!({"type":"reveal","index":first})).unwrap();
-        assert_eq!(r.board.as_ref().unwrap()[first], 0);
+        assert_eq!(r.players[0].board.as_ref().unwrap()[first], 0);
         assert!(r.players[0].revealed.contains(&first));
         assert!(r.started_at.unwrap() <= now());
     }
 }
 #[test]
-fn multiplayer_shares_one_board_and_guarantees_both_first_clicks_even_when_dense() {
-    for mines in [10, 72] {
-        let mut r = Room::new(&json!({"width":9,"height":9,"mines":mines})).unwrap();
-        let p = r.players[0].id.clone();
-        let q = r.join("Friend").unwrap();
-        r.act(&p, &json!({"type":"ready"})).unwrap();
-        assert_eq!(r.phase, Phase::Waiting);
-        r.act(&q, &json!({"type":"ready"})).unwrap();
-        assert_eq!(r.phase, Phase::Playing);
-        assert!(r.act(&p, &json!({"type":"reveal","index":0})).is_err());
-        r.available_at = Some(now() - 1);
-        r.act(&p, &json!({"type":"reveal","index":0})).unwrap();
-        assert!(r.board.is_none());
-        r.act(&p, &json!({"type":"reveal","index":1})).unwrap();
-        assert_eq!(r.players[0].opening, Some(0));
-        r.act(&q, &json!({"type":"reveal","index":80})).unwrap();
-        let board = r.board.as_ref().unwrap();
-        assert_eq!(board.iter().filter(|&&n| n == -1).count(), mines);
-        assert_ne!(board[0], -1);
-        assert_ne!(board[80], -1);
-        assert!(r.players[0].revealed.contains(&0));
-        assert!(r.players[1].revealed.contains(&80));
+fn multiplayer_uses_independent_settings_and_safe_first_clicks() {
+    let mut r = Room::new(&json!({"difficulty":"medium"})).unwrap();
+    let p = r.players[0].id.clone();
+    let hard = Settings::from_input(&json!({"difficulty":"hard"})).unwrap();
+    let q = r.join_with_settings("Friend", hard).unwrap();
+    r.act(
+        &p,
+        &json!({"type":"ready","settings":{"difficulty":"easy"}}),
+    )
+    .unwrap();
+    assert_eq!(r.phase, Phase::Waiting);
+    r.act(&q, &json!({"type":"ready"})).unwrap();
+    assert!(r.act(&p, &json!({"type":"reveal","index":0})).is_err());
+    r.available_at = Some(now() - 1);
+    r.act(&p, &json!({"type":"reveal","index":0})).unwrap();
+    assert!(r.players[0].board.is_some());
+    assert!(r.players[1].board.is_none());
+    r.act(&q, &json!({"type":"reveal","index":479})).unwrap();
+    for (player, count, first) in [(&r.players[0], 10, 0), (&r.players[1], 99, 479)] {
+        let b = player.board.as_ref().unwrap();
+        assert_eq!(b.iter().filter(|&&n| n == -1).count(), count);
+        assert_eq!(b[first], 0);
+        assert!(player.revealed.contains(&first));
     }
+    assert_eq!(r.view(&p).unwrap()["settings"]["width"], 9);
+    assert_eq!(r.view(&q).unwrap()["settings"]["width"], 30);
+    assert!(
+        r.act(&p, &json!({"type":"settings","difficulty":"hard"}))
+            .is_err()
+    );
 }
+
 fn fixture() -> Room {
     let mut r = Room::new(&json!({"width":5,"height":5,"mines":1})).unwrap();
     let mut board = vec![0; 25];
@@ -127,32 +135,41 @@ fn left_click_chords_only_with_matching_flags_and_wins() {
     assert_eq!(r.winner, Some(id));
 }
 #[test]
-fn incorrect_chord_forfeit_and_rematch() {
+fn incorrect_multiplayer_chord_explodes_but_forfeit_still_ends_the_round() {
     let mut r = fixture();
     let id = r.players[0].id.clone();
+    let qid = r.join("Friend").err();
+    assert!(qid.is_some()); // Active rooms cannot be joined.
     let q = Player::new("Friend");
     let qid = q.id.clone();
     r.players.push(q);
     r.act(&id, &json!({"type":"flag","index":1})).unwrap();
     r.act(&id, &json!({"type":"reveal","index":6})).unwrap();
-    assert_eq!(r.players[0].status, Status::Lost);
+    assert_eq!(r.phase, Phase::Playing);
+    assert_eq!(r.players[0].status, Status::Playing);
+    assert_eq!(r.players[0].hits, 1);
+    assert!(r.winner.is_none());
+    r.act(&id, &json!({"type":"leave"})).unwrap();
     assert_eq!(r.winner, Some(qid.clone()));
     assert!(r.act(&qid, &json!({"type":"rematch"})).is_err());
     r.act(&id, &json!({"type":"rematch"})).unwrap();
-    assert!(r.board.is_none());
-    assert!(r.started_at.is_none());
-    assert!(
-        r.players
-            .iter()
-            .all(|p| p.opening.is_none() && p.revealed.is_empty() && !p.ready)
-    );
-    r.act(&id, &json!({"type":"ready"})).unwrap();
-    r.act(&qid, &json!({"type":"ready"})).unwrap();
-    r.act(&id, &json!({"type":"leave"})).unwrap();
-    assert_eq!(r.winner, Some(qid));
+    assert!(r.players.iter().all(|p| p.board.is_none()
+        && p.hits == 0
+        && p.explosion.is_none()
+        && p.revealed.is_empty()));
 }
 #[test]
-fn public_views_hide_mines_tokens_and_opponent_flags() {
+fn solo_mine_hit_still_ends_the_game() {
+    let mut r = fixture();
+    r.solo = true;
+    let id = r.players[0].id.clone();
+    r.act(&id, &json!({"type":"reveal","index":0})).unwrap();
+    assert_eq!(r.phase, Phase::Finished);
+    assert_eq!(r.players[0].status, Status::Lost);
+    assert!(r.players[0].explosion.is_none());
+}
+#[test]
+fn public_views_show_opponent_numbers_and_mines_but_hide_own_mines_and_tokens() {
     let mut r = fixture();
     let id = r.players[0].id.clone();
     let q = Player::new("Friend");
@@ -168,6 +185,9 @@ fn public_views_hide_mines_tokens_and_opponent_flags() {
     assert!(v["cells"][0].is_null());
     assert_eq!(v["players"][1]["clearedCells"], json!([1, 6]));
     assert_eq!(v["players"][1]["flags"], 1);
+    assert_eq!(v["players"][1]["cells"][0], -1);
+    assert_eq!(v["players"][1]["cells"][6], 1);
+    assert!(v["players"][0]["cells"].is_null());
     assert!(r.view("unknown").is_err());
 }
 #[test]
@@ -196,5 +216,132 @@ fn loads_legacy_node_snapshot_without_losing_game_state() {
     assert_eq!(r.players[0].opening, None);
     r.act("legacy-session", &json!({"type":"reveal","index":12}))
         .unwrap();
-    assert_ne!(r.board.unwrap()[12], -1);
+    assert_ne!(r.players[0].board.as_ref().unwrap()[12], -1);
+}
+
+fn clues(settings: Settings, mines: &[usize]) -> Vec<i8> {
+    let mut b = vec![0; settings.len()];
+    for &i in mines {
+        b[i] = -1;
+    }
+    for i in 0..b.len() {
+        if b[i] != -1 {
+            b[i] = settings
+                .neighbors(i)
+                .into_iter()
+                .filter(|&j| b[j] == -1)
+                .count() as i8;
+        }
+    }
+    b
+}
+#[test]
+fn explosion_resets_region_preserves_mines_updates_visible_boundary_clues_and_spares_opponent() {
+    let mut r = Room::new(&json!({"width":10,"height":10,"mines":3})).unwrap();
+    let id = r.players[0].id.clone();
+    let guest = r.join("Friend").unwrap();
+    r.phase = Phase::Playing;
+    r.available_at = Some(now() - 1);
+    r.started_at = Some(now() - 1000);
+    let s = r.settings;
+    let before = clues(s, &[22, 44, 99]);
+    r.players[0].board = Some(before.clone());
+    r.players[0].opening = Some(0);
+    r.players[0].revealed = (0..s.len())
+        .filter(|&i| before[i] != -1 && i != 0 && i != 23)
+        .collect();
+    r.players[0].flags = vec![23, 99];
+    r.players[1].board = Some(clues(s, &[0, 1, 2]));
+    r.players[1].revealed = vec![44];
+    let other = serde_json::to_value(&r.players[1]).unwrap();
+    r.act(&id, &json!({"type":"reveal","index":44})).unwrap();
+    let p = &r.players[0];
+    let blast = p.explosion.as_ref().unwrap();
+    let b = p.board.as_ref().unwrap();
+    assert_eq!((blast.x, blast.y, blast.width, blast.height), (2, 2, 6, 6));
+    assert_eq!(blast.cells.len(), 36);
+    assert_eq!(p.hits, 1);
+    assert_eq!(r.phase, Phase::Playing);
+    assert!(p.revealed.iter().all(|i| !blast.cells.contains(i)));
+    assert_eq!(p.flags, vec![99]);
+    assert_eq!(b.iter().filter(|&&v| v == -1).count(), 3);
+    assert_eq!(blast.cells.iter().filter(|&&i| b[i] == -1).count(), 2);
+    assert_ne!(b[44], -1);
+    for i in 0..s.len() {
+        if !blast.cells.contains(&i) {
+            assert_eq!(b[i] == -1, before[i] == -1);
+        }
+        if b[i] != -1 {
+            assert_eq!(
+                b[i] as usize,
+                s.neighbors(i).into_iter().filter(|&j| b[j] == -1).count()
+            );
+        }
+    }
+    let view = r.view(&id).unwrap();
+    for &i in &p.revealed {
+        assert_eq!(view["cells"][i], b[i]);
+    }
+    for &i in &blast.cells {
+        assert!(view["cells"][i].is_null());
+    }
+    assert_eq!(serde_json::to_value(&r.players[1]).unwrap(), other);
+    assert_eq!(r.view(&guest).unwrap()["players"][0]["cells"], json!(b));
+    let next = blast.cells.iter().copied().find(|&i| b[i] == -1).unwrap();
+    r.act(&id, &json!({"type":"reveal","index":next})).unwrap();
+    assert_eq!(r.players[0].hits, 2);
+    assert_eq!(r.phase, Phase::Playing);
+}
+#[test]
+fn blasts_are_full_sized_at_edges_and_clamped_on_small_or_fully_mined_regions() {
+    for (width, height, hit) in [
+        (10, 10, 0),
+        (10, 10, 9),
+        (10, 10, 90),
+        (10, 10, 99),
+        (5, 5, 24),
+        (5, 10, 0),
+        (10, 5, 49),
+    ] {
+        let mut r = Room::new(&json!({"width":width,"height":height,"mines":1})).unwrap();
+        let id = r.players[0].id.clone();
+        r.phase = Phase::Playing;
+        r.available_at = Some(now() - 1);
+        r.players[0].board = Some(clues(r.settings, &[hit]));
+        r.act(&id, &json!({"type":"reveal","index":hit})).unwrap();
+        let blast = r.players[0].explosion.as_ref().unwrap();
+        assert_eq!(blast.cells.len(), width.min(6) * height.min(6));
+        assert!(blast.cells.contains(&hit));
+        assert!(blast.cells.iter().all(|&i| i < width * height));
+        assert_eq!(
+            r.players[0]
+                .board
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|&&v| v == -1)
+                .count(),
+            1
+        );
+    }
+    let mut r = Room::new(&json!({"width":10,"height":10,"mines":36})).unwrap();
+    let id = r.players[0].id.clone();
+    r.phase = Phase::Playing;
+    let mines: Vec<_> = (2..8)
+        .flat_map(|y| (2..8).map(move |x| y * 10 + x))
+        .collect();
+    r.players[0].board = Some(clues(r.settings, &mines));
+    r.act(&id, &json!({"type":"reveal","index":44})).unwrap();
+    assert_eq!(r.phase, Phase::Playing);
+    assert_eq!(r.players[0].hits, 1);
+    assert_eq!(
+        r.players[0]
+            .board
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|&&v| v == -1)
+            .count(),
+        36
+    );
 }
