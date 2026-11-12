@@ -5,3 +5,6 @@
 .data
 node_modules
 dist
+target
+.sites-checkout
+public/minefield.wasm

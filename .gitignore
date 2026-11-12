@@ -3,3 +3,5 @@ node_modules/
 dist/
 *.tar.gz
 .sites-checkout/
+/target/
+/public/minefield.wasm
