@@ -10,6 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut interval = tokio::time::interval(Duration::from_millis(150));
         loop {
             interval.tick().await;
+            writer.advance_bots();
             if let Err(e) = writer.flush().await {
                 eprintln!("Could not save rooms: {e}");
             }

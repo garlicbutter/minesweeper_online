@@ -248,3 +248,51 @@ async fn expiration_validation_and_solo_room_restrictions() {
     );
     tokio::fs::remove_dir_all(path).await.unwrap();
 }
+
+#[tokio::test]
+async fn ai_is_scheduled_without_polling_and_survives_persistence() {
+    let path = dir();
+    let state = AppState::load(path.clone()).await.unwrap();
+    let app = router(state.clone());
+    let (status, created) = request(
+        &app,
+        "/api/rooms",
+        Some(json!({"difficulty":"hard","bot":true})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let token = created["token"].as_str().unwrap();
+    let code = created["room"]["code"].as_str().unwrap();
+    let base = format!("/api/rooms/{code}");
+    let action = format!("{base}/action");
+    assert_eq!(created["room"]["players"][1]["bot"], true);
+    request(&app, &action, Some(json!({"type":"ready"})), Some(token)).await;
+    state.advance_bots();
+    state.flush().await.unwrap();
+    let before: Vec<Room> =
+        serde_json::from_slice(&tokio::fs::read(path.join("rooms.json")).await.unwrap()).unwrap();
+    assert!(before[0].players[1].board.is_none());
+    tokio::time::sleep(std::time::Duration::from_millis(3050)).await;
+    state.advance_bots();
+    state.flush().await.unwrap(); // No browser poll or request has driven this move.
+    let after: Vec<Room> =
+        serde_json::from_slice(&tokio::fs::read(path.join("rooms.json")).await.unwrap()).unwrap();
+    assert!(!after[0].players[1].revealed.is_empty());
+    let restored = router(AppState::load(path.clone()).await.unwrap());
+    let (_, view) = request(&restored, &base, None, Some(token)).await;
+    assert_eq!(view["room"]["players"][1]["bot"], true);
+    assert!(view["room"]["players"][1]["cleared"].as_u64().unwrap() > 0);
+    request(&app, &action, Some(json!({"type":"leave"})), Some(token)).await;
+    request(&app, &action, Some(json!({"type":"rematch"})), Some(token)).await;
+    let (_, again) = request(&app, &base, None, Some(token)).await;
+    assert_eq!(again["room"]["players"][1]["ready"], true);
+    assert!(
+        again["room"]["players"][1]["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c.is_null())
+    );
+    tokio::fs::remove_dir_all(path).await.unwrap();
+}

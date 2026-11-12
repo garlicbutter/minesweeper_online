@@ -32,7 +32,7 @@ fn random() -> u32 {
         rand::random()
     }
 }
-fn random_int(n: usize) -> usize {
+pub(crate) fn random_int(n: usize) -> usize {
     let range = 1u64 << 32;
     let limit = range - range % n as u64;
     loop {
@@ -177,6 +177,10 @@ pub struct Player {
     pub name: String,
     pub ready: bool,
     #[serde(default)]
+    pub bot: bool,
+    #[serde(default)]
+    pub bot_next_move_at: Option<u64>,
+    #[serde(default)]
     pub settings: Option<Settings>,
     #[serde(default)]
     pub board: Option<Vec<i8>>,
@@ -202,6 +206,8 @@ impl Player {
                 name
             },
             ready: false,
+            bot: false,
+            bot_next_move_at: None,
             settings: None,
             board: None,
             hits: 0,
@@ -214,7 +220,8 @@ impl Player {
         }
     }
     fn reset(&mut self) {
-        self.ready = false;
+        self.ready = self.bot;
+        self.bot_next_move_at = None;
         self.opening = None;
         self.board = None;
         self.revealed.clear();
@@ -328,14 +335,31 @@ impl Room {
         let settings = Settings::from_input(input)?;
         let mut player = Player::new(input["name"].as_str().unwrap_or("Player"));
         player.settings = Some(settings);
+        let solo = input["solo"].as_bool().unwrap_or(false);
+        let mut players = vec![player];
+        if input["bot"].as_bool().unwrap_or(false) {
+            if solo {
+                return Err("AI opponents require multiplayer mode.".into());
+            }
+            let bot_settings = if input["botSettings"].is_null() {
+                settings
+            } else {
+                Settings::from_input(&input["botSettings"])?
+            };
+            let mut bot = Player::new("Test AI");
+            bot.bot = true;
+            bot.ready = true;
+            bot.settings = Some(bot_settings);
+            players.push(bot);
+        }
         Ok(Self {
             code: (0..6)
                 .map(|_| alphabet[random_int(alphabet.len())] as char)
                 .collect(),
             settings,
-            players: vec![player],
+            players,
             phase: Phase::Waiting,
-            solo: input["solo"].as_bool().unwrap_or(false),
+            solo,
             board: None,
             available_at: None,
             started_at: None,
@@ -350,7 +374,11 @@ impl Room {
         self.join_with_settings(name, self.settings)
     }
     pub fn join_with_settings(&mut self, name: &str, settings: Settings) -> Result<String, String> {
-        if self.solo || self.phase != Phase::Waiting || self.players.len() >= 2 {
+        if self.solo
+            || self.phase != Phase::Waiting
+            || self.players.len() >= 2
+            || self.players.iter().any(|p| p.bot)
+        {
             return Err("This room is full or the match has started.".into());
         }
         let mut p = Player::new(name);
@@ -520,6 +548,52 @@ impl Room {
         self.version += 1;
         Ok(())
     }
+    /// Advance at most one AI move per room per scheduled turn. HTTP polling never drives it.
+    pub fn advance_bot(&mut self, at: u64) -> bool {
+        if self.solo
+            || self.phase != Phase::Playing
+            || at.saturating_sub(self.created_at) >= 86_400_000
+            || at < self.available_at.unwrap_or(u64::MAX)
+        {
+            return false;
+        }
+        let Some(bot) = self
+            .players
+            .iter()
+            .find(|p| p.bot && p.status == Status::Playing)
+        else {
+            return false;
+        };
+        if at < bot.bot_next_move_at.unwrap_or(0) {
+            return false;
+        }
+        let settings = bot.settings.unwrap_or(self.settings);
+        let mut visible = vec![None; settings.len()];
+        if let Some(board) = bot.board.as_ref() {
+            for &index in &bot.revealed {
+                visible[index] = Some(board[index]);
+            }
+        }
+        let id = bot.id.clone();
+        let next = crate::bot::choose_move(settings, &visible, &bot.flags);
+        let Some(next) = next else {
+            return false;
+        };
+        let (action, index) = match next {
+            crate::bot::BotMove::Reveal(i) => ("reveal", i),
+            crate::bot::BotMove::Flag(i) => ("flag", i),
+        };
+        if self
+            .act(&id, &json!({"type":action,"index":index}))
+            .is_err()
+        {
+            return false;
+        }
+        if let Some(bot) = self.players.iter_mut().find(|p| p.id == id) {
+            bot.bot_next_move_at = Some(at.saturating_add(700));
+        }
+        true
+    }
     pub fn view(&self, id: &str) -> Result<Value, String> {
         let me = self
             .players
@@ -546,7 +620,7 @@ impl Room {
             let cleared: Vec<_> = p.revealed.iter().copied().filter(|&i| board.is_none_or(|b| b[i] != -1)).collect();
             // Full opponent layouts are intentionally visible. Your own hidden cells stay masked.
             let opponent_cells: Option<Vec<Option<i8>>> = if p.id != id { Some((0..settings.len()).map(|i| board.map(|b| b[i])).collect()) } else { None };
-            json!({"name":p.name,"you":p.id==id,"ready":p.ready,"settings":settings,"openingChosen":p.opening.is_some(),"status":p.status,"cleared":cleared.len(),"flags":p.flags.len(),"clearedCells":cleared,"cells":opponent_cells,"hits":p.hits,"explosion":p.explosion,"online":now().saturating_sub(p.last_seen)<15000,"winner":self.winner.as_deref()==Some(p.id.as_str())})
+            json!({"name":p.name,"you":p.id==id,"bot":p.bot,"ready":p.ready,"settings":settings,"openingChosen":p.opening.is_some(),"status":p.status,"cleared":cleared.len(),"flags":p.flags.len(),"clearedCells":cleared,"cells":opponent_cells,"hits":p.hits,"explosion":p.explosion,"online":p.bot||now().saturating_sub(p.last_seen)<15000,"winner":self.winner.as_deref()==Some(p.id.as_str())})
         }).collect();
         Ok(
             json!({"code":self.code,"settings":settings,"phase":self.phase,"solo":self.solo,"availableAt":self.available_at,"startedAt":self.started_at,"finishedAt":self.finished_at,"version":self.version,"winner":self.winner.as_ref().map(|winner|if winner==id{"you"}else{"opponent"}),"round":self.round,"host":self.players.first().is_some_and(|p|p.id==id),"me":{"name":me.name,"ready":me.ready,"opening":me.opening,"revealed":me.revealed,"flags":me.flags,"status":me.status,"lastSeen":me.last_seen,"hits":me.hits,"explosion":me.explosion},"players":players,"cells":cells}),

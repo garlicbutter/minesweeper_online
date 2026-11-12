@@ -43,6 +43,15 @@ impl AppState {
             flush_lock: tokio::sync::Mutex::new(()),
         }))
     }
+    pub fn advance_bots(&self) {
+        let mut rooms = self.rooms.lock().unwrap();
+        let at = now();
+        for room in rooms.values_mut() {
+            if room.advance_bot(at) {
+                self.dirty.store(true, Ordering::Release);
+            }
+        }
+    }
     pub async fn flush(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _guard = self.flush_lock.lock().await;
         if !self.dirty.swap(false, Ordering::AcqRel) {

@@ -70,6 +70,12 @@ First to clear every safe cell on their own board wins. Leaving an active match 
 
 To test both players on one computer, use separate browser profiles or an incognito window. For the same Wi-Fi, use the host’s LAN address (e.g. `http://192.168.1.20:3000`) on both devices. Run `hostname -I` to find it. Open that address before copying an invite; localhost links only work on the host computer.
 
+## Test multiplayer against AI
+
+Choose **vs AI**, select a difficulty, and click **Start vs AI**, then **Ready**. The server adds a player labeled **Test AI**, waits for the normal countdown, and takes roughly one move every 0.7 seconds. Its board, flags, progress, mine penalties, wins, forfeits, and rematches use the same multiplayer rules as a human opponent.
+
+The AI uses only its own visible clues and flags: it reveals cells beside satisfied clues, flags cells forced by a clue, and guesses when no certain move is available. It is a basic play-test opponent, not an advanced solver. It does not read hidden mines or the human’s board. Moves run on the server independently of browser polling and stop when the round finishes or expires. The AI is ready automatically in each rematch; the human still clicks Ready. Its initial difficulty matches the selected creation difficulty; the human can change their own settings in the lobby.
+
 ## Deploy on Render
 
 The included `render.yaml` now uses **Docker**, replacing the previous Node runtime.
@@ -88,6 +94,7 @@ Official guidance: [Docker on Render](https://render.com/docs/docker), [native r
 
 ## Architecture and storage
 
+- `src/bot.rs`: basic AI decisions from visible clues and flags; no hidden board input.
 - `src/game.rs`: shared Rust rules, random mine generation, flood fill, flags, chording, wins/losses, independent maps, explosion penalties, and player views.
 - `src/wasm.rs`: a small JSON/memory bridge to the same Rust rules in the browser.
 - `public/game.js`: WebAssembly loading and JavaScript bindings; it contains no mine-generation or gameplay implementation.
@@ -117,8 +124,11 @@ Optional end-to-end browser check (requires Playwright/Chromium installed separa
 # Start the Rust server first, then:
 PLAYWRIGHT_PATH=/path/to/playwright node tests/browser-smoke.cjs
 PLAYWRIGHT_PATH=/path/to/playwright node tests/chord-preview.cjs
+PLAYWRIGHT_PATH=/path/to/playwright node tests/ai-browser.cjs
 ```
 
 It checks browser-local solo play with API access blocked, click latency, persistent DOM tiles, covered starts/replays, two-player play with different difficulties, safe openings, all opponent numbers/mines, continued play after explosions, nonselectable tile text, reset during a stalled request, and the mobile layout. Set `TEST_URL` to use a different address.
 
 The focused chord check covers held neighbor highlighting, mismatched flags, matching chords on press, release without duplicate actions, redraws, edge bounds, keyboard activation, blur/reset cleanup, and touch cancellation/tapping.
+
+The AI check covers the compact interface, AI readiness, autonomous moves with browser polling blocked, normal forfeit/rematch behavior, and desktop/mobile layouts. Rust tests additionally cover solver deductions, move pacing, wins, mine penalties, and AI persistence.

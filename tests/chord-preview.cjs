@@ -29,7 +29,7 @@ const assert = require('node:assert/strict');
       sessionStorage.setItem('minefield-solo', JSON.stringify(room));
     }, { flags, revealed });
     await target.reload();
-    await target.waitForFunction(() => document.querySelector('#phase').textContent === 'Your pace. Your game.');
+    await target.waitForFunction(() => document.querySelector('#phase').textContent === 'Playing');
   }
   async function press(index, button = 'left') {
     await page.locator(`#board [data-i="${index}"]`).hover();

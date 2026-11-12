@@ -5,6 +5,7 @@ This file applies to the entire repository. See `README.md` for player-facing se
 ## Stack and source ownership
 
 - The server and game rules are Rust. Axum serves HTTP; Tokio runs the server and background persistence.
+- `src/bot.rs` owns basic AI move selection from visible clues and flags. It must not inspect hidden layouts or the human’s board.
 - `src/game.rs` owns generation, reveals, flood fill, flags, chording, independent player maps, explosions, wins, and player views.
 - The same engine compiles to WebAssembly for browser-local solo play. Do not duplicate game rules in JavaScript.
 - `src/wasm.rs` implements the JSON/memory bridge. `public/game.js` loads the module and exposes its bindings.
@@ -52,6 +53,7 @@ PORT=3001 DATA_DIR=/tmp/minefield-qa ./target/release/minefield
 - Flood fill must respect flags and board boundaries.
 - Tile text must remain nonselectable when dragged.
 - Preserve keyboard controls, responsive layouts, and readable tile numbers.
+- Keep the interface compact and functional: no promotional slogans, hero copy, decorative quotes, or repeated instructions. Put detailed rules in How to play.
 
 ### Single player
 
@@ -69,6 +71,14 @@ PORT=3001 DATA_DIR=/tmp/minefield-qa ./target/release/minefield
 - The opponent panel intentionally shows all opponent numbers and mines after their board is generated, including covered cells. Mark which cells they have cleared. Do not hide this layout as a privacy change.
 - Keep the viewer's own unrevealed cells masked in API responses. Never expose either player's session token in public views.
 - First to clear every safe cell on their own board wins. Leaving an active match forfeits it. Host rematches preserve each player's difficulty and clear round progress and explosion counters.
+
+### AI play testing
+
+- Keep **vs AI** as a clearly labeled multiplayer test mode with a **Test AI** player, not a fake human or a second solo mode.
+- AI decisions receive only the bot’s visible clues and flags. Use basic deductions, then guesses when necessary. Do not exploit the full opponent-board API view or hidden mine layout.
+- The server schedules paced moves independently of browser requests; the current minimum interval is 700 ms. Respect human readiness and the countdown. Do not reveal the human’s opening automatically.
+- Use normal multiplayer actions, win conditions, and reshuffle penalties. Stop after completion, forfeit, or expiry. Reset the AI’s board and scheduler for rematches and mark it ready automatically.
+- Persist the AI marker and scheduler metadata with room snapshots. Hide unusable invite actions for AI rooms.
 
 ### Multiplayer explosion penalty
 
@@ -118,7 +128,7 @@ For interaction changes, run the existing browser check against a running server
 TEST_URL=http://localhost:3001 PLAYWRIGHT_PATH=/path/to/playwright node tests/browser-smoke.cjs
 ```
 
-Omit `PLAYWRIGHT_PATH` if Playwright resolves normally. This check covers local solo play with the API blocked, click latency, persistent tile nodes, first-click safety, independent difficulties, opponent layouts, explosions, nonselectable tiles, instant reset during a stalled request, and mobile layout. For chord-preview changes, also run `tests/chord-preview.cjs` with the same environment; it exercises held highlights and input cancellation. Report any unavailable verification accurately. Stop test servers you started when finished.
+Omit `PLAYWRIGHT_PATH` if Playwright resolves normally. This check covers local solo play with the API blocked, click latency, persistent tile nodes, first-click safety, independent difficulties, opponent layouts, explosions, nonselectable tiles, instant reset during a stalled request, and mobile layout. For chord-preview changes, also run `tests/chord-preview.cjs` with the same environment; it exercises held highlights and input cancellation. For AI changes, also run `tests/ai-browser.cjs` to verify autonomous play, readiness, and rematches. Report any unavailable verification accurately. Stop test servers you started when finished.
 
 ## Deployment and repository hygiene
 

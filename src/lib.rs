@@ -1,3 +1,4 @@
+pub mod bot;
 pub mod game;
 #[cfg(feature = "server")]
 pub mod server;

@@ -64,7 +64,7 @@ async function start() {
   try {
     const data = mode === 'join'
       ? await request('/' + $('code').value.trim().toUpperCase() + '/join', { ...config(), name: name() })
-      : await request('', { ...config(), name: name(), solo: mode === 'solo' });
+      : await request('', { ...config(), name: name(), solo: mode === 'solo', bot: mode === 'ai' });
     session = { code: data.room.code, token: data.token };
     sessionStorage.setItem('minefield-session', JSON.stringify(session));
     room = data.room;
@@ -100,17 +100,19 @@ function tab(nextMode) {
   $('join-form').hidden = mode !== 'join';
   $('create-form').hidden = false;
   $('create').hidden = mode === 'join';
-  for (const [id, value] of [['solo-tab', 'solo'], ['create-tab', 'multi'], ['join-tab', 'join']]) {
+  for (const [id, value] of [['solo-tab', 'solo'], ['ai-tab', 'ai'], ['create-tab', 'multi'], ['join-tab', 'join']]) {
     $(id).classList.toggle('selected', mode === value);
     $(id).setAttribute('aria-pressed', mode === value);
   }
-  $('create').textContent = mode === 'solo' ? 'Start single player →' : 'Create challenge ↗';
-  $('mode-note').textContent = mode === 'solo'
-    ? 'Your pace. Your next best time. A safe opening, ready to play.'
-    : 'Choose your own difficulty. Mine hits reshuffle a 6 × 6 area.';
+  $('create').textContent = mode === 'solo' ? 'Start single player' : mode === 'ai' ? 'Start vs AI' : 'Create room';
+  if (!room) {
+    $('game-title').textContent = mode === 'solo' ? 'Single player' : mode === 'ai' ? 'vs AI' : mode === 'join' ? 'Join room' : 'Host room';
+    $('status').textContent = mode === 'join' ? 'Enter a room code.' : 'Choose a difficulty.';
+  }
 }
 $('create').onclick = $('join').onclick = start;
 $('solo-tab').onclick = () => tab('solo');
+$('ai-tab').onclick = () => tab('ai');
 $('create-tab').onclick = () => tab('multi');
 $('join-tab').onclick = () => tab('join');
 for (const button of document.querySelectorAll('[data-level]')) button.onclick = () => {
@@ -284,7 +286,7 @@ function progress() {
   progressKey = key;
   $('scoreboard').replaceChildren();
   const players = [...room.players].sort((a, b) => Number(b.you) - Number(a.you));
-  if (!room.solo && players.length < 2) players.push({ name: 'Waiting for a friend', cleared: 0, ready: false, online: false });
+  if (!room.solo && players.length < 2) players.push({ name: 'Waiting for opponent', cleared: 0, ready: false, online: false });
   for (const player of players) {
     const card = document.createElement('div'); card.className = 'progress-card';
     const title = document.createElement('strong'); title.textContent = player.name + (player.you ? ' (you)' : '');
@@ -328,6 +330,7 @@ function render() {
   if (!room) return;
   if (configuredRoom !== room.code) {
     configuredRoom = room.code;
+    tab(room.solo ? 'solo' : room.players.some(player => player.bot) ? 'ai' : room.host ? 'multi' : 'join');
     const preset = Object.entries(PRESETS).find(([, s]) => s.width === room.settings.width && s.height === room.settings.height && s.mines === room.settings.mines);
     level = preset?.[0] || 'custom';
     for (const button of document.querySelectorAll('[data-level]')) button.classList.toggle('selected', button.dataset.level === level);
@@ -335,31 +338,36 @@ function render() {
     $('custom').hidden = level !== 'custom';
   }
   $('setup').querySelectorAll('input,button').forEach(button => button.disabled = true);
+  $('create').hidden = true;
+  $('join-form').hidden = true;
   if (room.phase === 'waiting' && !room.me.ready) {
     for (const button of document.querySelectorAll('[data-level], #custom input')) button.disabled = false;
   }
   $('room-bar').hidden = false;
   $('room-prefix').textContent = room.solo ? 'SINGLE PLAYER' : 'ROOM';
   $('room-code').textContent = room.solo ? '' : room.code;
-  $('copy').hidden = room.solo;
-  $('board-label').textContent = room.solo ? 'SINGLE PLAYER' : 'LIVE 1v1 · ROUND ' + room.round;
+  const hasAI = room.players.some(player => player.bot);
+  $('copy').hidden = room.solo || hasAI;
+  $('room-prefix').parentElement.hidden = room.solo || hasAI;
+  $('board-label').textContent = 'Round ' + room.round;
   $('mine-count').textContent = room.settings.mines - room.me.flags.length;
-  $('phase').textContent = room.phase === 'waiting' ? 'In the lobby' : room.phase === 'finished' ? 'Round complete' : room.solo ? 'Your pace. Your game.' : 'Match in progress';
-  $('game-title').textContent = room.phase === 'waiting' ? 'Your challenge awaits.' : room.phase === 'finished'
-    ? (room.players.some(player => player.you && player.winner) ? 'Nicely swept. You win!' : !room.solo && room.winner === null ? 'Both boards cleared. A draw!' : room.solo ? 'One mine too many.' : 'Your friend takes the win.') : 'Make every click count.';
+  $('phase').textContent = room.phase === 'waiting' ? 'Lobby' : room.phase === 'finished' ? 'Round complete' : 'Playing';
+  $('game-title').textContent = room.phase === 'finished'
+    ? (room.players.some(player => player.you && player.winner) ? 'You win' : !room.solo && room.winner === null ? 'Draw' : room.solo ? 'Mine hit' : room.players.some(player => player.bot) ? 'AI wins' : 'Opponent wins')
+    : room.solo ? 'Single player' : room.players.some(player => player.bot) ? 'vs AI' : '1v1';
   progress();
   $('ready').hidden = room.phase !== 'waiting' || room.solo;
-  $('ready').textContent = room.me.ready ? 'Cancel ready' : 'Ready to play →';
+  $('ready').textContent = room.me.ready ? 'Cancel ready' : 'Ready';
   $('rematch').hidden = room.phase !== 'finished' || !room.host;
   $('status').textContent = room.phase === 'waiting'
-    ? (room.players.length < 2 && !room.solo ? 'Share your code. Your friend joins here.' : room.me.ready ? 'Waiting for your opponent to get ready…' : 'Choose your difficulty, then click Ready to play.')
-    : room.phase === 'finished' ? (room.solo ? 'Play again, or end the game to change difficulty.' : 'A good game deserves a rematch.') : room.solo ? 'Clear every safe square. Watch your flags.' : 'Mine hit? A 6 × 6 area resets and reshuffles. Keep clearing.';
+    ? (room.players.length < 2 && !room.solo ? 'Share the room code.' : room.me.ready ? 'Waiting for opponent.' : 'Choose your difficulty, then Ready.')
+    : room.phase === 'finished' ? (room.host ? 'Play again or reset.' : 'Waiting for host.') : room.solo ? 'Clear all safe tiles.' : 'Mine hits reset a 6 × 6 area.';
   board(room.cells, room.settings, room.me.flags);
   const explosion = room.me.explosion;
   if (explosion && lastExplosion !== `${room.code}/${room.round}/${explosion.sequence}`) {
     lastExplosion = `${room.code}/${room.round}/${explosion.sequence}`;
     if (Date.now() - explosion.at < 5000) {
-      toast(`Mine hit! ${explosion.width} × ${explosion.height} area reset and reshuffled. Keep playing.`);
+      toast(`${explosion.width} × ${explosion.height} area reset and reshuffled.`);
       clearTimeout(blastTimer);
       blastTimer = setTimeout(() => { if (room) board(room.cells, room.settings, room.me.flags); }, 1050);
     }
@@ -374,7 +382,7 @@ function tick() {
   }
   if (room.phase === 'playing' && remaining <= 0 && room.me.opening === null) {
     $('phase').textContent = 'Choose your first square';
-    $('status').textContent = 'Click any square to begin. Your first click is safe.';
+    $('status').textContent = 'First click is safe.';
   }
   const end = room.phase === 'finished' ? room.finishedAt || room.startedAt : Date.now();
   const seconds = room.startedAt ? Math.max(0, Math.floor((end - room.startedAt) / 1000)) : 0;
@@ -383,10 +391,10 @@ function tick() {
 function renderDemo() {
   $('setup').querySelectorAll('input,button').forEach(button => button.disabled = false);
   $('room-bar').hidden = $('ready').hidden = $('rematch').hidden = true;
-  $('game-title').textContent = 'A clean slate.';
-  $('phase').textContent = 'Ready when you are';
-  $('status').textContent = 'Choose a difficulty and start a single-player game.';
-  $('board-label').textContent = 'SINGLE PLAYER';
+  $('game-title').textContent = 'Single player';
+  $('phase').textContent = 'Ready';
+  $('status').textContent = 'Choose a difficulty.';
+  $('board-label').textContent = '';
   const preview = config(), previewSettings = PRESETS[preview.difficulty] || { width: 9, height: 9, mines: 10 };
   $('mine-count').textContent = previewSettings.mines;
   progressKey = '';
@@ -394,6 +402,7 @@ function renderDemo() {
   $('scoreboard').replaceChildren();
   board(Array(previewSettings.width * previewSettings.height).fill(null), previewSettings, [], true);
   tick();
+  tab(mode);
 }
 setInterval(tick, 250);
 setInterval(async () => {
