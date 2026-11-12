@@ -106,9 +106,12 @@ const path = require('node:path');
     assert.equal(blast.phase,'playing'); assert.equal(blast.me.hits,1); assert.equal(blast.me.explosion.cells.length,36);
     assert(blast.me.explosion.cells.every(i => blast.cells[i] === null));
     assert.equal(await host.locator('#board .blast').count(),36);
-    await guest.waitForFunction(index => !document.querySelector(`#opponent-board [data-index="${index}"]`).classList.contains('mine'),target);
+    await guest.waitForFunction(() => document.querySelector('#scoreboard .progress-card:last-child .player-state').textContent === '1 explosions');
     assert.equal(await guest.locator('#opponent-board .mine').count(),0);
-    assert(await guest.locator('#opponent-board .n1').count() > 0);
+    for (const index of blast.me.explosion.cells) {
+      assert.equal(await guest.locator(`#opponent-board [data-index="${index}"]`).textContent(),'');
+      assert.equal(await guest.locator(`#opponent-board [data-index="${index}"].open`).count(),0);
+    }
     // Leaving is still immediate; mine hits alone no longer finish the round.
     assert.equal(await host.locator('#scoreboard progress').count(), 2);
     await host.screenshot({ path: '/tmp/minefield-desktop.png', fullPage: true });
